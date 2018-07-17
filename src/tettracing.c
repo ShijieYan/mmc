@@ -813,6 +813,10 @@ float badouel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit){
  * and can only store energy loss using 0-th order basis function. This function
  * is the fastest among the 4 ray-tracers.
  *
+ * in highscat acceleration, this ray-tracer is entered ONLY when ray passes through 
+ * boundary of current element and traveles into the next, which is determined  
+ * beforehand by function checkdist()
+ *
  * \param[in,out] r: the current ray
  * \param[in] tracer: the ray-tracer aux data structure
  * \param[in] cfg: simulation configuration structure
@@ -820,30 +824,27 @@ float badouel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit){
  */
 
 float branchless_badouel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit){
-
 	float3 bary={1e10f,0.f,0.f,0.f};
-	float Lp0=0.f,rc,currweight,dlen,ww,totalloss=0.f;
-	int tshift,faceidx=-1,baseid,eid;
+	float rc,currweight,ww,totalloss;
+	// float currweight_temp=r->weight;
+	int faceidx=-1,baseid,eid;
 	__m128 O,T,S;
-	const __m128 sign_mask = _mm_set1_ps(-0.f);
-	__m128 Nx,Ny,Nz,dd;
 
-	r->p0.w=1.f;
+	r->p0.w=1.f;    
 	r->vec.w=0.f;
-	eid=r->eid-1;
-	baseid=eid<<2;
-	r->isend=0;
+	eid=r->eid-1;   	   /**< r.eid is element index and 1-indexed index*/
+	baseid=eid<<2;    	   /**< left-shift by 2 bits as each element has 4 nodes and 4 faces*/                     
 
-	r->pout.x=MMC_UNDEFINED;
-	r->faceid=-1;
+	r->pout.x=MMC_UNDEFINED;   /**< set to maximum value by default*/
+	r->faceid=-1;   	   
 
-	Nx=_mm_load_ps(&(tracer->n[baseid].x));
-	Ny=_mm_load_ps(&(tracer->n[baseid+1].x));
-	Nz=_mm_load_ps(&(tracer->n[baseid+2].x));
-	dd=_mm_load_ps(&(tracer->n[baseid+3].x));
+	const __m128 Nx=_mm_load_ps(&(tracer->n[baseid].x));   /**< load face norms of current element*/
+	const __m128 Ny=_mm_load_ps(&(tracer->n[baseid+1].x));
+	const __m128 Nz=_mm_load_ps(&(tracer->n[baseid+2].x));
+	const __m128 dd=_mm_load_ps(&(tracer->n[baseid+3].x));
 
-	O = _mm_set1_ps(r->p0.x);
-	T = _mm_mul_ps(Nx,O);
+	O = _mm_set1_ps(r->p0.x);       
+	T = _mm_mul_ps(Nx,O);            
 	O = _mm_set1_ps(r->p0.y);
 	T = _mm_add_ps(T, _mm_mul_ps(Ny,O));
 	O = _mm_set1_ps(r->p0.z);
@@ -866,222 +867,250 @@ float branchless_badouel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visito
 	O = _mm_min_ss(O, S);
 	
 	_mm_store_ss(&(bary.x),O);
-	faceidx=maskmap[_mm_movemask_ps(_mm_cmpeq_ps(T,_mm_set1_ps(bary.x)))];
-	r->faceid=faceorder[faceidx];
-	
-	visit->raytet++;
-        if(tracer->mesh->type[eid]==0)
-                visit->raytet0++;
+	/**< calculate distances between photon position and 4 intersection points, bary.x is the smallest*/    		   
+	faceidx=maskmap[_mm_movemask_ps(_mm_cmpeq_ps(T,_mm_set1_ps(bary.x)))]; 
+	r->faceid=faceorder[faceidx];     /**< r.faceid is the intersection face, will be used to determine next element id*/
 
-	if(r->faceid>=0){
-	    medium *prop;
-	    int *enb, *ee=(int *)(tracer->mesh->elem+eid*tracer->mesh->elemlen);
-	    float mus;
-	    prop=tracer->mesh->med+(tracer->mesh->type[eid]);
-	    rc=prop->n*R_C0;
-            currweight=r->weight;
-            mus=(cfg->mcmethod==mmMCX) ? prop->mus : (prop->mua+prop->mus);
-            enb=(int *)(tracer->mesh->facenb+eid*tracer->mesh->elemlen);
+	if(r->faceid>=0 && bary.x>=0){ 	  /**< ray hits face, not edge or node, if bary.x<0, fixphoton and redo ray-tet test as photon is not exactly inside current element*/
+		medium *prop;   
+		prop=tracer->mesh->med+(tracer->mesh->type[eid]);   /**< optical properties of current element*/
+		rc=prop->n*R_C0;          /**< reciprocal of light speed in the current element*/
+		currweight=r->weight;
+		float mus = prop->mus;     
+		int *enb=(int *)(tracer->mesh->facenb+eid*tracer->mesh->elemlen);
 
-            r->nexteid=enb[r->faceid]; // if I use nexteid-1, the speed got slower, strange!
-            if(r->nexteid){
-           	    _mm_prefetch((char *)&(tracer->n[(r->nexteid-1)<<2].x),_MM_HINT_T0);
-	    }
+		r->Lmove=bary.x;/**< intersection confirmed beforehand, directly assign movement length using bary.x*/
 
-	    dlen=(mus <= EPS) ? R_MIN_MUS : r->slen/mus;
-	    Lp0=bary.x;
-	    r->isend=(Lp0>=dlen);
-	    if(r->isend){
-            	    _mm_prefetch((char *)&(tracer->mesh->node[ee[2]-1].x),_MM_HINT_T0);
-		    _mm_prefetch((char *)&(tracer->mesh->node[ee[3]-1].x),_MM_HINT_T0);
-	    }
-	    r->Lmove=((r->isend) ? dlen : Lp0);
+		O = _mm_load_ps(&(r->vec.x));   /**< load direction cosine*/
+		S = _mm_load_ps(&(r->p0.x));        /**< load photon position before intersection*/
+		T = _mm_set1_ps(r->Lmove);       
+		T = _mm_mul_ps(O, T);               /**< calculate movement vector: direction cosine*length*/
+		T = _mm_add_ps(T, S);               /**< exit-point on the boundary*/
+		_mm_store_ps(&(r->pout.x),T);       /**< update pout using T*/
 
-            O = _mm_load_ps(&(r->vec.x));
-	    S = _mm_load_ps(&(r->p0.x));
-	    T = _mm_set1_ps(bary.x);
-	    T = _mm_mul_ps(O, T);
-	    T = _mm_add_ps(T, S);
-	    _mm_store_ps(&(r->pout.x),T); // pout is the exit-point of the ray, always on the boundary
+		r->nexteid=enb[r->faceid];   /**< if I use nexteid-1, the speed got slower, strange!*/
+		if(r->nexteid){              /**< positive integer value means the ray enters another element within the object mesh*/
+			calcudist(r->pout, r->nexteid, r, tracer); /**< update r.dist using perpendicular distances between exit-point and boundaries of the next element*/
+			r->isend=1;          /**< intersection calculation finishes, start tracking r.dist in the next element*/
+		}
 
-	    if((int)((r->photontimer+r->Lmove*rc-cfg->tstart)*visit->rtstep)>=(int)((cfg->tend-cfg->tstart)*visit->rtstep)){ /*exit time window*/
-	       r->faceid=-2;
-	       r->pout.x=MMC_UNDEFINED;
-	       r->Lmove=(cfg->tend-r->photontimer)/(prop->n*R_C0)-1e-4f;
-	    }
-            if(cfg->mcmethod==mmMCX){
+     		if((int)((r->photontimer+r->Lmove*rc-cfg->tstart)*visit->rtstep)>=(int)((cfg->tend-cfg->tstart)*visit->rtstep)){ 
+			r->faceid=-2;        /**< exit time window*/
+			r->pout.x=MMC_UNDEFINED;
+			r->Lmove=(cfg->tend-r->photontimer)/(prop->n*R_C0)-1e-4f; /**< update movement length, original r.Lmove could be truncated by time window*/
+		}       
+		
 #ifdef __INTEL_COMPILER
-	       totalloss=expf(-prop->mua*r->Lmove);
+	        totalloss=expf(-prop->mua*r->Lmove);
 #else
-	       totalloss=fast_expf9(-prop->mua*r->Lmove);
+		totalloss=fast_expf9(-prop->mua*r->Lmove);
 #endif
-               r->weight*=totalloss;
-            }
-	    totalloss=1.f-totalloss;
-	    if(cfg->seed==SEED_FROM_FILE && cfg->outputtype==otJacobian){
-#ifdef __INTEL_COMPILER
-		currweight=expf(-DELTA_MUA*r->Lmove);
-#else
-		currweight=fast_expf9(-DELTA_MUA*r->Lmove);
-#endif
-                currweight*=cfg->replayweight[r->photonid];
-		currweight+=r->weight;
-	    }else if(cfg->seed==SEED_FROM_FILE && cfg->outputtype==otWL){
-		currweight=r->Lmove;
-		currweight*=cfg->replayweight[r->photonid];
-		currweight+=r->weight;
-            }
-	    r->slen-=r->Lmove*mus;
-	    if(cfg->seed==SEED_FROM_FILE && cfg->outputtype==otWP){
-		if(r->slen0<EPS)
-		    currweight=1;
-		else
-		    currweight=r->Lmove*mus/r->slen0;
-		currweight*=cfg->replayweight[r->photonid];
-		currweight+=r->weight;
-	    }
-	    if(bary.x>=0.f){
-	        int framelen=(cfg->basisorder?tracer->mesh->nn:tracer->mesh->ne);
-		if(cfg->method==rtBLBadouelGrid)
-		    framelen=cfg->crop0.z;
-		ww=currweight-r->weight;
-        	r->photontimer+=r->Lmove*rc;
+                r->weight*=totalloss;  /**< remaining weight=current weight*exp(-mua*Lmove)*/
+	        r->slen-=r->Lmove*mus; /**< update remaining unitless scattering length*/
 
-		if(cfg->outputtype==otWL || cfg->outputtype==otWP)
-			tshift=MIN( ((int)(cfg->replaytime[r->photonid]*visit->rtstep)), cfg->maxgate-1 )*framelen;
-		else
-                	tshift=MIN( ((int)((r->photontimer-cfg->tstart)*visit->rtstep)), cfg->maxgate-1 )*framelen;
+		int framelen=cfg->crop0.z;     /**< framelen is dim.x*dim.y*dimz, dim is dimension of bounding box(DMMC)*/
+		ww=currweight-r->weight;       /**< total weight loss in this movement*/
+        	r->photontimer+=r->Lmove*rc;   /**< update photontimer using real movement length*/
 
-        	if(cfg->debuglevel&dlAccum) MMC_FPRINTF(cfg->flog,"A %f %f %f %e %d %e\n",
-        	   r->p0.x,r->p0.y,r->p0.z,bary.x,eid+1,dlen);
+        	int tshift=MIN( ((int)((r->photontimer-cfg->tstart)*visit->rtstep)), cfg->maxgate-1 )*framelen;
 
 		if(prop->mua>0.f){
-		  r->Eabsorb+=ww;
-		  if(cfg->outputtype==otFlux || cfg->outputtype==otJacobian)
-                     ww/=prop->mua;
+		  	r->Eabsorb+=ww;       		     /**< absorbed energy accumulation*/
 		}
-
-	        T = _mm_set1_ps(r->Lmove);
-	        T = _mm_add_ps(S, _mm_mul_ps(O, T));
-	        _mm_store_ps(&(r->p0.x),T);
-
-		if(r->isend || r->dist<0.f){
-		    float4 nd3,nd2;
-	            __m128 d3,d2;
-                    __m128 N3=_mm_load_ps(&(tracer->mesh->node[ee[3]-1].x)); // get the 4th node
-		    __m128 N2=_mm_load_ps(&(tracer->mesh->node[ee[2]-1].x)); // get the 3rd node
-
-		    d3=_mm_sub_ps(N3,T); // T is current pos, N3->T vector
-		    d2=_mm_sub_ps(N2,T); // T is current pos, N2->T vector
-		    _mm_store_ps(&(nd3.x),d3);  // save d3 to float4
-		    _mm_store_ps(&(nd2.x),d2);  // save d2 to float4
-
-                    d3=_mm_set_ps(nd2.x,nd3.x,nd3.x,nd3.x);  // create x-component projection
-		    d2=_mm_mul_ps(d3,Nx);
-
-                    d3=_mm_set_ps(nd2.y,nd3.y,nd3.y,nd3.y);  // create y-component projection
-		    d2=_mm_add_ps(d2,_mm_mul_ps(d3,Ny));
-
-                    d3=_mm_set_ps(nd2.z,nd3.z,nd3.z,nd3.z);  // create z-component projection
-		    d2=_mm_add_ps(d2,_mm_mul_ps(d3,Nz));
-
-		    _mm_store_ps(&(nd2.x),d2);  // save d2 to float4
-
-		    d2=_mm_andnot_ps(sign_mask, d2);  // take absolute value
-
-		    d3 = _mm_movehl_ps(d2, d2);   // take horizontal min for min distance to faces, and store into r->dist 
-		    d3 = _mm_min_ps(d3, d2);
-		    d2 = _mm_shuffle_ps(d3, d3, _MM_SHUFFLE(1,1,1,1));
-		    d3 = _mm_min_ss(d3, d2);
-		    _mm_store_ss(&(r->dist),d3);
-		    r->dist*=prop->mus;
+	
+		__m128i P;
+		float dstep, segloss;
+		int4 idx __attribute__ ((aligned(16)));      /**< aligned16 is important, required by function _mm_store_si128*/
+		int i, seg=(int)(r->Lmove)+1;
+		seg=(seg<<1);
+		dstep=r->Lmove/seg;			     /**< use sufficiently small step to preserve accuracy*/
+// #ifdef __INTEL_COMPILER
+		// segloss=expf(-prop->mua*dstep);           /**< weightloss of each segment */
+// #else
+// 		segloss=fast_expf9(-prop->mua*dstep);
+// #endif
+		segloss=ww/seg;
+		T =  _mm_mul_ps(O, _mm_set1_ps(dstep));      /**< vector that each step takes: (direction cosine * step length)*/
+		O =  _mm_sub_ps(S, _mm_load_ps(&(tracer->mesh->nmin.x)));       /**< vector points to original photon position from lower-corner of bounding box(DMMC)*/
+		S =  _mm_add_ps(O, _mm_mul_ps(T, _mm_set1_ps(0.5f)));           /**< vector points to mid-point of 1st segment from lower-corner of bounding box*/
+		dstep=1.f/cfg->unitinmm;                                        /**< length unit: conversion to mm*/
+	
+		for(i=0; i< seg; i++){
+			P =_mm_cvtps_epi32(_mm_mul_ps(S, _mm_set1_ps(dstep)));  /**< convert a floating-point number to 32-bit integer, to determine which voxel to deposit*/
+			_mm_store_si128((__m128i *)&(idx.x),P);
+			tracer->mesh->weight[idx.z*cfg->crop0.y+idx.y*cfg->crop0.x+idx.x+tshift]+=segloss; /**< deposit loss of each segment*/
+			// currweight_temp*=segloss;			        /**< update photon weight after each segment*/
+			S = _mm_add_ps(S, T);				        /**< move photon forward by one step, to the mid-point of next segment*/
 		}
-
-                if(cfg->mcmethod==mmMCX){
-		  if(!cfg->basisorder){
-		     if(cfg->method==rtBLBadouel){
-                        if(cfg->isatomic)
-#pragma omp atomic
-			    tracer->mesh->weight[eid+tshift]+=ww;
-                        else
-                            tracer->mesh->weight[eid+tshift]+=ww;
-		     }else{
-                           __m128i P;
-			   float dstep, segloss, w0;
-			   int4 idx __attribute__ ((aligned(16)));
-			   int i, seg=(int)(r->Lmove)+1;
-			   seg=(seg<<1);
-			   dstep=r->Lmove/seg;
-#ifdef __INTEL_COMPILER
-			   segloss=expf(-prop->mua*dstep);
-#else
-			   segloss=fast_expf9(-prop->mua*dstep);
-#endif
-			   T =  _mm_mul_ps(O, _mm_set1_ps(dstep)); /*step*/
-			   O =  _mm_sub_ps(S, _mm_load_ps(&(tracer->mesh->nmin.x)));
-			   S =  _mm_add_ps(O, _mm_mul_ps(T, _mm_set1_ps(0.5f))); /*starting point*/
-			   dstep=1.f/cfg->unitinmm;
-			   totalloss=(totalloss==0.f)? 0.f : (1.f-segloss)/totalloss;
-			   w0=ww;
-			    for(i=0; i< seg; i++){
-			       P =_mm_cvtps_epi32(_mm_mul_ps(S, _mm_set1_ps(dstep)));
-			       _mm_store_si128((__m128i *)&(idx.x),P);
-			       tracer->mesh->weight[idx.z*cfg->crop0.y+idx.y*cfg->crop0.x+idx.x+tshift]+=w0*totalloss;
-			       w0*=segloss;
-			       S = _mm_add_ps(S, T);
-			    }
-		       }
-		  }else{
-			int i;
-                        ww*=1.f/4.f;
-                        if(cfg->isatomic)
-			    for(i=0;i<4;i++)
-#pragma omp atomic
-				tracer->mesh->weight[ee[i]-1+tshift]+=ww;
-                        else
-                            for(i=0;i<4;i++)
-                                tracer->mesh->weight[ee[i]-1+tshift]+=ww;
-		  }
-		}
-	    }
+	
 	}
-
+	visit->raytet++;   		 /**< update ray-tetrahedron test counter*/
+        if(tracer->mesh->type[eid]==0)   /**< if current element is out of object mesh, update counter raytet0*/
+                visit->raytet0++;
 	r->p0.w=0.f;
-	if(r->faceid==-2)
-           return 0.f;
+	if(r->faceid==-2)		 /**< if photon exits time window, return 0.f and stop propagation*/
+           	return 0.f;
 
 	return r->slen;
 }
 
-inline void savegrid(float mua,float ww, float totalloss, int tshift, ray *r, raytracer *tracer,mcconfig *cfg){
-	__m128i P;
-	__m128 O,T,S;
+/** 
+ * \brief Function to check if a ray intersects with an element 
+ * 
+ * when a photon travels inside a tetrahedron, all components of r.dist are positive. if it passes
+ * through any boundary and flies out of the current element, at least one component of r.dist 
+ * will become nonpositive, which means that photon moves to the other side of corresponding face,
+ * otherwise if all components of r.dist are positive, photon will stays in the current element
+ * after this movement
+ *
+ * \param[in,out] r: the current ray
+ * \param[in] tracer: the ray-tracer aux data structure
+ */
 
-	float dstep, segloss, w0;
-	int4 idx __attribute__ ((aligned(16)));
-	int i, seg=(int)(r->Lmove)+1;
-	seg=(seg<<1);
-	dstep=r->Lmove/seg;
+inline void checkdist(ray *r, raytracer *tracer, int *caldistcount){
+
+	__m128 O,T,Nx,Ny,Nz;
+	int baseid=(r->eid-1)<<2;
+
+	Nx=_mm_load_ps(&(tracer->n[baseid].x));     /**< load face norms of current element*/
+	Ny=_mm_load_ps(&(tracer->n[baseid+1].x));
+	Nz=_mm_load_ps(&(tracer->n[baseid+2].x));
+
+	T=_mm_load_ps(&(r->dist.x));     	    /**< load unitless perpendicular distances between photon and tetrahedron boundaries*/
+
+	O=_mm_set1_ps(r->vec.x*r->slen);  	    /**< x-component of unitless movement vector: direction cosine * remaining unitless scattering length*/
+	T=_mm_sub_ps(T,_mm_mul_ps(O,Nx));   	    /**< subtraction because face norms point outward*/
+
+	O=_mm_set1_ps(r->vec.y*r->slen); 	    /**< y-component of unitless movement vector*/
+	T=_mm_sub_ps(T,_mm_mul_ps(O,Ny));
+
+	O=_mm_set1_ps(r->vec.z*r->slen); 	    /**< z-component of unitless movement vector*/
+	T=_mm_sub_ps(T,_mm_mul_ps(O,Nz));
+	_mm_store_ps(&(r->dist.x),T);    	    /**< output results to r.dist*/
+	/**< if any component of r.dist is nonpositive, it means ray will intersect with current element*/
+	r->isend = !((r->dist.x<0) || (r->dist.y<0) || (r->dist.z<0) || (r->dist.w<0));
+	(*caldistcount)++;
+}
+
+/** 
+ * \brief Function to determine the perpendicular distances between photon and tetrahedron boundaries 
+ * 
+ * use vector operations to determine r.dist: position[P], face[F1] and a point[Node] on the face
+ * vector[V] = Node-P, vector[Norm] = normalized norm of F1, then  
+ * perpendicular distance between P and F1 is inner product ⟨V,Norm⟩ 
+ *
+ * \param[in] p: photon position
+ * \param[in] eid: element number
+ * \param[in,out] r: the current ray
+ * \param[in] tracer: the ray-tracer aux data structure
+ */
+
+inline void calcudist(float3 p, int eid, ray *r, raytracer *tracer){
+
+	int baseid=(eid-1)<<2;
+	int *ee=(int *)(tracer->mesh->elem+(eid-1)*tracer->mesh->elemlen);
+	medium *prop=tracer->mesh->med+(tracer->mesh->type[eid-1]); /**< optical properties of element*/
+	__m128 T=_mm_load_ps(&(p.x)),d3,d2,Nx,Ny,Nz;                /**< load photon position to T*/
+	Nx=_mm_load_ps(&(tracer->n[baseid].x));        	            /**< load face norms of element*/
+	Ny=_mm_load_ps(&(tracer->n[baseid+1].x));
+	Nz=_mm_load_ps(&(tracer->n[baseid+2].x));
+	
+	float4 nd3,nd2;
+	__m128 N3=_mm_load_ps(&(tracer->mesh->node[ee[3]-1].x));  /**< load 4th node of element*/
+	__m128 N2=_mm_load_ps(&(tracer->mesh->node[ee[2]-1].x));  /**< load 3rd node of element*/
+
+	d3=_mm_sub_ps(N3,T);                                      /**< vector points to node4 from photon position*/
+	d2=_mm_sub_ps(N2,T);                                      /**< vector points to node3 from photon position*/
+	_mm_store_ps(&(nd3.x),d3);                                
+	_mm_store_ps(&(nd2.x),d2);                                
+	
+	d3=_mm_set_ps(nd2.x,nd3.x,nd3.x,nd3.x);  /**< create x-component projection*/
+	d2=_mm_mul_ps(d3,Nx);
+
+	d3=_mm_set_ps(nd2.y,nd3.y,nd3.y,nd3.y);  /**< create y-component projection*/
+	d2=_mm_add_ps(d2,_mm_mul_ps(d3,Ny));
+
+	d3=_mm_set_ps(nd2.z,nd3.z,nd3.z,nd3.z);  /**< create z-component projection*/
+	d2=_mm_add_ps(d2,_mm_mul_ps(d3,Nz));
+
+	_mm_store_ps(&(nd2.x),d2);  
+	d3=_mm_set1_ps(prop->mus);
+	d3=_mm_mul_ps(d3,d2);                    /**< convert absolute distance to unitless distance using mus of corresponding element*/
+	_mm_store_ps(&(r->dist.x),d3);           
+}
+
+/** 
+ * \brief Function to save weight loss into grid and check time window  
+ *
+ * \param[in,out] r: the current ray
+ * \param[in] tracer: the ray-tracer aux data structure
+ * \param[in] cfg: simulation configuration structure
+ * \param[in] visit: statistics counters of this thread
+ */
+
+void savegrid(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit){
+	
+	__m128 T,O,S;
+	int eid=r->eid, tshift;
+	medium *prop=tracer->mesh->med+(tracer->mesh->type[eid-1]);
+	float mus = prop->mus;
+	r->Lmove=(mus <= EPS) ? R_MIN_MUS : r->slen/mus;
+	float rc=prop->n*R_C0;
+
+	if((int)((r->photontimer+r->Lmove*rc-cfg->tstart)*visit->rtstep)>=(int)((cfg->tend-cfg->tstart)*visit->rtstep)){/**< exit time window*/
+		r->faceid=-2;
+		r->pout.x=MMC_UNDEFINED;
+		r->Lmove=(cfg->tend-r->photontimer)/(prop->n*R_C0)-1e-4f;
+	}/**< re-calculate real movement length, previous r-Lmove could be truncated by time window*/
+					        
+	float currweight=r->weight,totalloss=0.f;
+	// float currweight_temp=r->weight;
 #ifdef __INTEL_COMPILER
-	segloss=expf(-mua*dstep);
+	totalloss=expf(-prop->mua*r->Lmove);
 #else
-	segloss=fast_expf9(-mua*dstep);
+	totalloss=fast_expf9(-prop->mua*r->Lmove);
 #endif
-        O = _mm_load_ps(&(r->vec.x));
-	S = _mm_load_ps(&(r->p0.x));
-	T =  _mm_mul_ps(O, _mm_set1_ps(dstep)); /*step*/
-	O =  _mm_sub_ps(S, _mm_load_ps(&(tracer->mesh->nmin.x)));
-	S =  _mm_add_ps(O, _mm_mul_ps(T, _mm_set1_ps(0.5f))); /*starting point*/
-	dstep=1.f/cfg->unitinmm;
-	totalloss=(totalloss==0.f)? 0.f : (1.f-segloss)/totalloss;
-	w0=ww;
-        for(i=0; i< seg; i++){
-	    P =_mm_cvtps_epi32(_mm_mul_ps(S, _mm_set1_ps(dstep)));
-	    _mm_store_si128((__m128i *)&(idx.x),P);
-	    tracer->mesh->weight[idx.z*cfg->crop0.y+idx.y*cfg->crop0.x+idx.x+tshift]+=w0*totalloss;
-	    w0*=segloss;
-	    S = _mm_add_ps(S, T);
-        }
+	r->weight*=totalloss;  			/**< remaining photon weight = current weight*exp(-mua*Lmove)*/
+	int framelen=cfg->crop0.z;      	/**< framelen is dim.x*dim.y*dimz, dim is dimension of bounding box(DMMC)*/
+	float ww=currweight-r->weight;  	/**< total weight loss in this movement*/
+        r->photontimer+=r->Lmove*rc;    	/**< update photontimer using real movement length*/
+
+        tshift=MIN( ((int)((r->photontimer-cfg->tstart)*visit->rtstep)), cfg->maxgate-1 )*framelen;
+
+	if(prop->mua>0.f){
+	  	r->Eabsorb+=ww;        		/**< absorbed energy accumulation*/
+	}
+	
+	S = _mm_load_ps(&(r->p0.x));		/**< load photon position*/
+	O = _mm_load_ps(&(r->vec.x));   	/**< load direction cosine*/
+        T = _mm_set1_ps(r->Lmove);   		/**< load movement length*/
+        T = _mm_add_ps(S, _mm_mul_ps(O, T));   
+        _mm_store_ps(&(r->p0.x),T);   		/**< update photon position after movement*/
+        
+        __m128i P;
+	float dstep, segloss;
+	int4 idx __attribute__ ((aligned(16))); /**< aligned16 is important, required by function _mm_store_si128*/
+	int i, seg=(int)(r->Lmove)+1;           
+	seg=(seg<<1);
+	dstep=r->Lmove/seg;                     /**< use sufficiently small step to preserve accuracy*/
+// #ifdef __INTEL_COMPILER
+   	// segloss=expf(-prop->mua*dstep);   	/**< weightloss of each segment*/
+// #else
+   	// segloss=fast_expf9(-prop->mua*dstep);
+// #endif
+	segloss=ww/seg;
+	T =  _mm_mul_ps(O, _mm_set1_ps(dstep)); /**< vector that each step takes: (direction cosine * step length)*/
+	O =  _mm_sub_ps(S, _mm_load_ps(&(tracer->mesh->nmin.x)));  	/**< vector points to original photon position from lower-corner of bounding box(DMMC)*/
+	S =  _mm_add_ps(O, _mm_mul_ps(T, _mm_set1_ps(0.5f))); 		/**< vector points to mid-point of 1st segment from lower-corner of bounding box*/
+	dstep=1.f/cfg->unitinmm;					/**< length unit: conversion to mm*/
+
+	for(i=0; i< seg; i++){
+		P =_mm_cvtps_epi32(_mm_mul_ps(S, _mm_set1_ps(dstep)));  /**< convert a floating-point number to 32-bit integer, to determine which voxel to deposit*/
+		_mm_store_si128((__m128i *)&(idx.x),P);	
+		tracer->mesh->weight[idx.z*cfg->crop0.y+idx.y*cfg->crop0.x+idx.x+tshift]+=segloss; 
+		// currweight_temp*=segloss;				/**< update photon weight after each segment*/
+		S = _mm_add_ps(S, T);					/**< move photon forward by one step, to the mid-point of next segment*/
+	}
 }
 
 #else
@@ -1090,7 +1119,6 @@ inline void savegrid(float mua,float ww, float totalloss, int tshift, ray *r, ra
  * Havel, Badouel and Branch-less Badouel-based SSE4 ray-tracer require to compile
  * with SSE4 only. Give an error if not compiled with SSE.
  */
-
 
 float havel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit){
 	MMC_ERROR(-6,"wrong option, please recompile with SSE4 enabled");
@@ -1124,12 +1152,12 @@ float branchless_badouel_raytet(ray *r, raytracer *tracer, mcconfig *cfg, visito
 float onephoton(unsigned int id,raytracer *tracer,tetmesh *mesh,mcconfig *cfg,
                 RandType *ran, RandType *ran0, visitor *visit){
 
-	int oldeid,fixcount=0,exitdet=0;
+	int oldeid,fixcount=0,caldistcount=0;
 	int *enb;
         float mom;
 	float kahany, kahant;
 	ray r={cfg->srcpos,{cfg->srcdir.x,cfg->srcdir.y,cfg->srcdir.z},{MMC_UNDEFINED,0.f,0.f},
-               cfg->bary0,cfg->e0,cfg->dim.y-1,0,0,1.f,0.f,0.f,0.f,0.f,0.,0,NULL,NULL,cfg->srcdir.w,0.f};
+               cfg->bary0,cfg->e0,cfg->dim.y-1,1,0,1.f,0.f,0.f,0.f,0.f,0.,0,NULL,NULL,cfg->srcdir.w,{0.f,0.f,0.f,0.f}};
 
 	float (*engines[5])(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit)=
 	       {plucker_raytet,havel_raytet,badouel_raytet,branchless_badouel_raytet,branchless_badouel_raytet};
@@ -1148,14 +1176,14 @@ float onephoton(unsigned int id,raytracer *tracer,tetmesh *mesh,mcconfig *cfg,
 	else
 	    MMC_ERROR(-6,"specified ray-tracing algorithm is not defined");
 
-	/*initialize the photon parameters*/
-        launchphoton(cfg, &r, mesh, ran, ran0);
-	r.partialpath[visit->reclen-2] = r.weight; /*last record in partialpath is the initial photon weight*/
+        launchphoton(cfg, &r, mesh, ran, ran0);    /**< launchphoton, initialize all parameters */
+        calcudist(r.p0,r.eid,&r,tracer);           /**< initialize perpendicular distances in the first element*/
+	r.partialpath[visit->reclen-2] = r.weight; /**< last record in partialpath is the initial photon weight*/
 
 	/*use Kahan summation to accumulate weight, otherwise, counter stops at 16777216*/
 	/*http://stackoverflow.com/questions/2148149/how-to-sum-a-large-number-of-float-number*/
 	if(cfg->seed==SEED_FROM_FILE && (cfg->outputtype==otWL || cfg->outputtype==otWP))
-		kahany=cfg->replayweight[r.photonid]-visit->kahanc;	/* when replay mode, accumulate detected photon weight */
+		kahany=cfg->replayweight[r.photonid]-visit->kahanc;	 /*when replay mode, accumulate detected photon weight*/ 
 	else
 		kahany=r.weight-visit->kahanc;
 	kahant=visit->totalweight + kahany;
@@ -1166,134 +1194,59 @@ float onephoton(unsigned int id,raytracer *tracer,tetmesh *mesh,mcconfig *cfg,
 	const float int_coef_arr[4] = { -1.f, -1.f, -1.f, 1.f };
 	int_coef = _mm_load_ps(int_coef_arr);
 #endif
-	while(1){  /*propagate a photon until exit*/
-	    r.slen=(*tracercore)(&r,tracer,cfg,visit);
-	    if(r.pout.x==MMC_UNDEFINED){
-	    	  if(r.faceid==-2) break; /*reaches the time limit*/
-		  if(fixcount++<MAX_TRIAL){
-			fixphoton(&r.p0,mesh->node,(int *)(mesh->elem+(r.eid-1)*mesh->elemlen));
-			continue;
-                  }
-	    	  r.eid=-r.eid;
-        	  r.faceid=-1;
-	    }
-	    if(cfg->issavedet && r.Lmove>0.f && mesh->type[r.eid-1]>0)
-	            r.partialpath[mesh->prop-1+mesh->type[r.eid-1]]+=r.Lmove;  /*second medianum block is the partial path*/
-	    /*move a photon until the end of the current scattering path*/
-	    while(r.faceid>=0 && !r.isend){
-	    	    memcpy((void *)&r.p0,(void *)&r.pout,sizeof(r.p0));
-
-	    	    enb=(int *)(mesh->facenb+(r.eid-1)*mesh->elemlen);
-		    oldeid=r.eid;
-	    	    r.eid=enb[r.faceid];
-
-		    if(cfg->isreflect && (r.eid==0 || mesh->med[mesh->type[r.eid-1]].n != mesh->med[mesh->type[oldeid-1]].n )){
-			if(! (r.eid==0 && mesh->med[mesh->type[oldeid-1]].n == cfg->nout ))
-			    reflectray(cfg,&r.vec,tracer,&oldeid,&r.eid,r.faceid,ran);
-		    }
-	    	    if(r.eid==0) break;
-		    /*when a photon enters the domain from the background*/
-		    if(mesh->type[oldeid-1]==0 && mesh->type[r.eid-1]){
-                        if(cfg->debuglevel&dlExit)
-			    MMC_FPRINTF(cfg->flog,"e %f %f %f %f %f %f %f %d\n",r.p0.x,r.p0.y,r.p0.z,
-			    	r.vec.x,r.vec.y,r.vec.z,r.weight,r.eid);
-                        if(!cfg->voidtime)
-                            r.photontimer=0.f;
-                    }
-		    /*when a photon exits the domain into the background*/
-		    if(mesh->type[oldeid-1] && mesh->type[r.eid-1]==0){
-                        if(cfg->debuglevel&dlExit)
-		            MMC_FPRINTF(cfg->flog,"x %f %f %f %f %f %f %f %d\n",r.p0.x,r.p0.y,r.p0.z,
-			        r.vec.x,r.vec.y,r.vec.z,r.weight,r.eid);
-			if(!cfg->isextdet){
-                            r.eid=0;
-        		    break;
-                        }
-		    }
-//		    if(r.eid==0 && mesh->med[mesh->type[oldeid-1]].n == cfg->nout ) break;
-	    	    if(r.pout.x!=MMC_UNDEFINED && (cfg->debuglevel&dlMove))
-	    		MMC_FPRINTF(cfg->flog,"P %f %f %f %d %u %e\n",r.pout.x,r.pout.y,r.pout.z,r.eid,id,r.slen);
-
-		    r.slen=(*tracercore)(&r,tracer,cfg,visit);
-		    if(cfg->issavedet && r.Lmove>0.f && mesh->type[r.eid-1]>0)
-			r.partialpath[mesh->prop-1+mesh->type[r.eid-1]]+=r.Lmove;
-		    if(r.faceid==-2) break;
-		    fixcount=0;
-		    while(r.pout.x==MMC_UNDEFINED && fixcount++<MAX_TRIAL){
-		       fixphoton(&r.p0,mesh->node,(int *)(mesh->elem+(r.eid-1)*mesh->elemlen));
-                       r.slen=(*tracercore)(&r,tracer,cfg,visit);
-		       if(cfg->issavedet && r.Lmove>0.f && mesh->type[r.eid-1]>0)
-	            		r.partialpath[mesh->prop-1+mesh->type[r.eid-1]]+=r.Lmove;
-		    }
-        	    if(r.pout.x==MMC_UNDEFINED){
-        		/*possibily hit an edge or miss*/
-			r.eid=-r.eid;
-        		break;
-        	    }
-	    }
-	    if(r.eid<=0 || r.pout.x==MMC_UNDEFINED) {
-        	    if(r.eid==0 && (cfg->debuglevel&dlMove))
-        		 MMC_FPRINTF(cfg->flog,"B %f %f %f %d %u %e\n",r.p0.x,r.p0.y,r.p0.z,r.eid,id,r.slen);
-		    if(r.eid==0){
-                       if(cfg->debuglevel&dlExit)
-        		 MMC_FPRINTF(cfg->flog,"E %f %f %f %f %f %f %f %d\n",r.p0.x,r.p0.y,r.p0.z,
-			    r.vec.x,r.vec.y,r.vec.z,r.weight,r.eid);
-                       if(cfg->issavedet && cfg->issaveexit){                                     /*when issaveexit is set to 1*/
-                            memcpy(r.partialpath+(visit->reclen-2-6),&(r.p0.x),sizeof(float)*3);  /*columns 7-5 from the right store the exit positions*/
-                            memcpy(r.partialpath+(visit->reclen-2-3),&(r.vec.x),sizeof(float)*3); /*columns 4-2 from the right store the exit dirs*/
-                       }
-		    }else if(r.faceid==-2 && (cfg->debuglevel&dlMove))
-                         MMC_FPRINTF(cfg->flog,"T %f %f %f %d %u %e\n",r.p0.x,r.p0.y,r.p0.z,r.eid,id,r.slen);
-	    	    else if(r.eid && r.faceid!=-2  && cfg->debuglevel&dlEdge)
-        		 MMC_FPRINTF(cfg->flog,"X %f %f %f %d %u %e\n",r.p0.x,r.p0.y,r.p0.z,r.eid,id,r.slen);
-		    if(cfg->issavedet && r.eid==0){
-		       int i;
-                       if(cfg->detnum==0 && cfg->isextdet && mesh->type[oldeid-1]==mesh->prop+1){
-                          exitdet=oldeid;
-                       }else
-		         for(i=0;i<cfg->detnum;i++){
-        		    if((cfg->detpos[i].x-r.p0.x)*(cfg->detpos[i].x-r.p0.x)+
-        		       (cfg->detpos[i].y-r.p0.y)*(cfg->detpos[i].y-r.p0.y)+
-        		       (cfg->detpos[i].z-r.p0.z)*(cfg->detpos[i].z-r.p0.z) < cfg->detpos[i].w*cfg->detpos[i].w){
-			          exitdet=i+1;
-                		  break;
-        		     }
-		         }
-		    }
-	    	    break;  /*photon exits boundary*/
-	    }
-	    if(cfg->debuglevel&dlMove) MMC_FPRINTF(cfg->flog,"M %f %f %f %d %u %e\n",r.p0.x,r.p0.y,r.p0.z,r.eid,id,r.slen);
-	    if(cfg->minenergy>0.f && r.weight < cfg->minenergy && (cfg->tend-cfg->tstart)*visit->rtstep<=1.f){ /*Russian Roulette*/
-		if(rand_do_roulette(ran)*cfg->roulettesize<=1.f){
-			r.weight*=cfg->roulettesize;
-                        if(cfg->debuglevel&dlWeight)
-			    MMC_FPRINTF(cfg->flog,"Russian Roulette bumps r.weight to %f\n",r.weight);
-		}else
-			break;
-	    }
-            mom=0.f;
-            r.slen0=mc_next_scatter(mesh->med[mesh->type[r.eid-1]].g,&r.vec,ran,ran0,cfg,&mom);
-	    r.slen=r.slen0;
-            if(cfg->mcmethod!=mmMCX)
-                  albedoweight(&r,mesh,cfg,visit);
-            if(cfg->ismomentum && mesh->type[r.eid-1]>0)                     /*when ismomentum is set to 1*/
-                  r.partialpath[(mesh->prop<<1)-1+mesh->type[r.eid-1]]+=mom; /*the third medianum block stores the momentum transfer*/
-            r.partialpath[mesh->type[r.eid-1]-1]++;                          /*the first medianum block stores the scattering event counts*/
-	}
-	if(cfg->issavedet && exitdet>0){
-		int offset=visit->bufpos*visit->reclen;
-		if(visit->bufpos>=visit->detcount){
-		    visit->detcount+=DET_PHOTON_BUF;
-		    visit->partialpath=(float *)realloc(visit->partialpath,
-				visit->detcount*visit->reclen*sizeof(float));
-		    if(cfg->issaveseed)
-	                    visit->photonseed=realloc(visit->photonseed,visit->detcount*(sizeof(RandType)*RAND_BUF_LEN));
+	while(1){ /**< start perpendicular distance tracking*/
+		checkdist(&r,tracer, &caldistcount);    /**< check if ray intersects with current element*/
+		if(r.isend){				/**< if not, because r.slen is not long enough*/
+			savegrid(&r,tracer,cfg,visit);  /**< save energy to grid, update total absorption and photontimer*/
+			if(caldistcount>MAX_TRACKING){  /**< after tracking distance of a photon in the same element for 20 scattering events, calculate the accurate distance due to numerical errors*/
+				calcudist(r.p0,r.eid,&r,tracer);
+				caldistcount=0;
+			}
+			if(r.faceid==-2)break; 		/**< exit time window, kill the photon*/
+			mom=0.f;
+	    		r.slen0=mc_next_scatter(mesh->med[mesh->type[r.eid-1]].g,&r.vec,ran,ran0,cfg,&mom); 
+	    		r.slen=r.slen0;			/**< no intersection confirmed before hand, therefore new scattering event trigerred directly*/
+		}else{                                  /**< if ray did intersects with current element, which means photon enters a new element or travels out of ROI*/  
+			r.slen=(*tracercore)(&r,tracer,cfg,visit);  /**< ray-tetradedron intersection calculation*/
+			caldistcount=0;
+			if(r.faceid==-2)break;
+			fixcount=0;  /**< if ray hits nodes or edge, fix p0*/
+			while(r.pout.x==MMC_UNDEFINED && fixcount++<MAX_TRIAL){
+		       		fixphoton(&r.p0,mesh->node,(int *)(mesh->elem+(r.eid-1)*mesh->elemlen));
+		       		r.slen=(*tracercore)(&r,tracer,cfg,visit);	/**< re-do ray-tetradedron intersection calculation*/
+		       	}
+		       	if(r.faceid==-2 || r.pout.x==MMC_UNDEFINED)break;	/**< exit time window, kill the photon*/
+		       	if(r.faceid>=0 && r.pout.x!=MMC_UNDEFINED)memcpy((void *)&r.p0,(void *)&r.pout,sizeof(r.p0));
+		        enb=(int *)(mesh->facenb+(r.eid-1)*mesh->elemlen);	/**< update element id*/
+		    	oldeid=r.eid;
+	    	    	r.eid=enb[r.faceid];
+		       	/**< do reflection when there is a refractive index mismatch between old element and new element*/
+			if(cfg->isreflect && (r.eid==0 || mesh->med[mesh->type[r.eid-1]].n != mesh->med[mesh->type[oldeid-1]].n )){
+				if(! (r.eid==0 && mesh->med[mesh->type[oldeid-1]].n == cfg->nout ))
+			    		reflectray(cfg,&r.vec,tracer,&oldeid,&r.eid,r.faceid,ran); 
+		    	}
+		    	if(r.eid==0) break;/**< if next element id is 0, kill photon*/
+		    	/**< when a photon enters the domain from the background*/
+			if(mesh->type[oldeid-1]==0 && mesh->type[r.eid-1]){
+			if(!cfg->voidtime)
+			    r.photontimer=0.f;
+			}
+			/**<when a photon exits the domain into the background*/
+			if(mesh->type[oldeid-1] && mesh->type[r.eid-1]==0){
+				if(!cfg->isextdet){
+				    r.eid=0;
+				    break;
+				}
+			}
+			if(r.eid<=0 || r.pout.x==MMC_UNDEFINED) {
+	    	    		break; /**< photon exits boundary*/
+	    		}
+	    		if(r.slen<=0){ /**< if new scattering event happens to be excatly at the intersection point on the boundary*/
+				mom=0.f;
+		    		r.slen0=mc_next_scatter(mesh->med[mesh->type[r.eid-1]].g,&r.vec,ran,ran0,cfg,&mom);
+		    		r.slen=r.slen0;
+		       	}/**< ray-tetradedron testing finishes, back to perpendicular distance tracking*/
 		}
-		visit->partialpath[offset]=exitdet;
-	        memcpy(visit->partialpath+offset+1,r.partialpath,(visit->reclen-1)*sizeof(float));
-                if(cfg->issaveseed)
-	            memcpy(visit->photonseed+visit->bufpos*(sizeof(RandType)*RAND_BUF_LEN),r.photonseed,(sizeof(RandType)*RAND_BUF_LEN));
-		visit->bufpos++;
 	}
 	free(r.partialpath);
         if(r.photonseed)

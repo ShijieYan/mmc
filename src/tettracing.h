@@ -34,6 +34,7 @@
 #include "mcx_utils.h"
 
 #define MAX_TRIAL          3          /**< number of fixes when a photon hits an edge/vertex */
+#define MAX_TRACKING       20         /**< maximum number of distance tracking in the same element */ 
 #define FIX_PHOTON         1e-3f      /**< offset to the ray to avoid edge/vertex */
 
 /***************************************************************************//**
@@ -61,7 +62,7 @@ typedef struct MMC_ray{
 	float *partialpath;           /**< pointer to the partial path data buffer */
         void  *photonseed;            /**< pointer to store the photon seed */
 	float focus;                  /**< focal length of the source, if defined */
-	float dist;                   /**< minimum distance to the boundary */
+	float4 dist;                  /**< perpendicular distances between photon position and tetrahedron boundaries */
 } ray;
 
 /***************************************************************************//**
@@ -94,7 +95,9 @@ void launchphoton(mcconfig *cfg, ray *r, tetmesh *mesh, RandType *ran, RandType 
 float reflectray(mcconfig *cfg,float3 *c0,raytracer *tracer,int *oldeid,int *eid,int faceid,RandType *ran);
 void save_scatter_events(ray *r, tetmesh *mesh, mcconfig *cfg, visitor *visit);
 void albedoweight(ray *r, tetmesh *mesh, mcconfig *cfg, visitor *visit);
-void savegrid(float mua,float ww,float totalloss, int tshift, ray *r, raytracer *tracer,mcconfig *cfg);
+void checkdist(ray *r, raytracer *tracer, int *caldistcount);
+void calcudist(float3 p, int eid, ray *r, raytracer *tracer);
+void savegrid(ray *r, raytracer *tracer, mcconfig *cfg, visitor *visit);
 
 #ifdef MCX_CONTAINER
 #ifdef __cplusplus
