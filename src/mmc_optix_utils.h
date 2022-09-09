@@ -11,7 +11,7 @@
 struct __align__( OPTIX_SBT_RECORD_ALIGNMENT ) RaygenRecord
 {
     __align__( OPTIX_SBT_RECORD_ALIGNMENT ) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-    void *data;
+    TriangleMeshSBTData data;
 };
 
 /*! SBT record for a miss program */
@@ -25,7 +25,7 @@ struct __align__( OPTIX_SBT_RECORD_ALIGNMENT ) MissRecord
 struct __align__( OPTIX_SBT_RECORD_ALIGNMENT ) HitgroupRecord
 {
     __align__( OPTIX_SBT_RECORD_ALIGNMENT ) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-    TriangleMeshSBTData data;
+    void *data;
 };
 
 // structure for optix pipeline setup

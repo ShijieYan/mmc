@@ -12,6 +12,7 @@
 
 constexpr float R_C0 = 3.335640951981520e-12f; //1/C0 in s/mm
 constexpr float MAX_ACCUM = 1000.0f;
+constexpr unsigned int INVALID_TRIANGLE = std::numeric_limits<unsigned int>::max();
 
 // simulation configuration and medium optical properties
 extern "C" {
@@ -32,22 +33,20 @@ __device__ __forceinline__ void launchPhoton(optixray &r, mcx::Random &rng) {
     r.p0 = gcfg.srcpos;
     r.dir = gcfg.srcdir;
     r.slen = rng.rand_next_scatlen();
+    r.hitlen = 0.0f;
     r.weight = 1.0f;
     r.photontimer = 0.0f;
+    r.triangleid = INVALID_TRIANGLE;
     r.mediumid = gcfg.mediumid0;
 }
 
 /**
  * @brief Move a photon one step forward
  */
-__device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
+__device__ __forceinline__ void movePhoton(optixray &r) {
     optixTrace(gcfg.gashandle, r.p0, r.dir, 0.0001f, std::numeric_limits<float>::max(),
         0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_NONE, 0, 1, 0,
-        *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
-        *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
-        *(uint32_t*)&(r.slen), *(uint32_t*)&(r.weight), *(uint32_t*)&(r.photontimer),
-        r.mediumid,
-        rng.intSeed.x, rng.intSeed.y, rng.intSeed.z, rng.intSeed.w);
+        *(uint32_t*)&(r.hitlen), *(uint32_t*)&(r.triangleid));
 }
 
 /**
@@ -194,9 +193,56 @@ extern "C" __global__ void __raygen__rg() {
     optixray r;
     launchPhoton(r, rng);
 
+    // triangle mesh data
+    const TriangleMeshSBTData &sbtData =
+        *(const TriangleMeshSBTData*)optixGetSbtDataPointer();
+
     int ndone = 0;  // number of simulated photons
     while (ndone < (gcfg.threadphoton + (launchindex.x < gcfg.oddphoton))) {
-        movePhoton(r, rng);
+        movePhoton(r);
+
+        // launch a new photon after miss
+        if (r.triangleid == INVALID_TRIANGLE) {
+            launchPhoton(r, rng);
+            ++ndone;
+            continue;
+        }
+
+        bool isfronthit = r.hitlen > 0.0f;
+        r.hitlen = fabsf(r.hitlen);
+
+        // triangle information
+        const uint4 index = sbtData.face[r.triangleid];
+
+        // get current meidium
+        r.mediumid = isfronthit ? (index.w >> 16) : (index.w & 0xFFFF);
+        const Medium currprop = gcfg.medium[r.mediumid];
+
+        // hit triangle or not
+        const float lmove = (r.slen > r.hitlen * currprop.mus) ?
+            r.hitlen : r.slen / currprop.mus;
+
+        accumulateOutput(r, currprop, lmove);
+
+        r.p0 += r.dir * lmove;
+
+        r.weight *= expf(-currprop.mua * lmove);
+
+        r.photontimer += lmove * R_C0 * currprop.n;
+
+        if (r.slen > r.hitlen * currprop.mus) {
+            // after hitting a boundary, update remaining scattering length
+            r.slen -= lmove * currprop.mus;
+
+            // update medium id (assume matched boundary)
+            r.mediumid = isfronthit ? (index.w & 0xFFFF) : (index.w >> 16);
+
+            // todo: update ray direction at a mismatched boundary
+        } else {
+            // after a scattering event, new direction and scattering length
+            r.dir = selectScatteringDirection(r.dir, currprop.g, rng);
+            r.slen = rng.rand_next_scatlen();
+        }
 
         // when a photon escapes or tof reaches the upper limit
         if (!(r.mediumid && r.photontimer < gcfg.tend)) {
@@ -210,75 +256,14 @@ extern "C" __global__ void __raygen__rg() {
  * @brief when a photon hits a triangle
  */
 extern "C" __global__ void __closesthit__ch() {
-    // get photon and ray information from payload
-    optixray r = getRay();
-
-    // get rng
-    mcx::Random rng = getRNG();
-
     // get intersection information
-    const float hitlen = optixGetRayTmax(); // distance
-    const int primid = optixGetPrimitiveIndex(); // triangle id
-
-    // triangle information
-    const TriangleMeshSBTData &sbtData =
-        *(const TriangleMeshSBTData*)optixGetSbtDataPointer();
-    const uint4 index = sbtData.face[primid];
-
-    // current medium id (this step is critical because tmin is not zero!)
-    r.mediumid = optixIsFrontFaceHit() ? (index.w >> 16) : (index.w & 0xFFFF);
-
-    // get medium properties
-    const Medium currprop = gcfg.medium[r.mediumid];
-    
-    // determine path length
-    const float lmove = (r.slen > hitlen * currprop.mus) ?
-        hitlen : r.slen / currprop.mus;
-
-    // save output
-    accumulateOutput(r, currprop, lmove);
-
-    // update photon position
-    r.p0 += r.dir * lmove;
-
-    // update photon weight
-    r.weight *= expf(-currprop.mua * lmove);
-
-    // update photon timer
-    r.photontimer += lmove * R_C0 * currprop.n;
-
-    // update photon direction if needed
-    if (r.slen > hitlen * currprop.mus) {
-        // after hitting a boundary, update remaining scattering length
-        r.slen -= lmove * currprop.mus;
-
-        // triangle nodes
-        const float3 &v0 = sbtData.node[index.x];
-        const float3 &v1 = sbtData.node[index.y];
-        const float3 &v2 = sbtData.node[index.z];
-
-        // get intersection (barycentric coordinate)
-        const float2 bary = optixGetTriangleBarycentrics();
-        r.p0 = (1.0f - bary.x - bary.y) * v0 + bary.x * v1 + bary.y * v2;
-
-        // update medium id (assume matched boundary)
-        r.mediumid = optixIsFrontFaceHit() ? (index.w & 0xFFFF) : (index.w >> 16);
-
-        // todo: update ray direction at a mismatched boundary
-    } else {
-        // after a scattering event, new direction and scattering length
-        r.dir = selectScatteringDirection(r.dir, currprop.g, rng);
-        r.slen = rng.rand_next_scatlen();
-    }
-
-    // update rng
-    setRNG(rng);
-
-    // update ray
-    setRay(r);
+    float hitlen = optixGetRayTmax();
+    optixSetPayload_0(__float_as_uint(optixIsFrontFaceHit() ? 
+        hitlen : -hitlen));
+    optixSetPayload_1(optixGetPrimitiveIndex());
 }
 
 extern "C" __global__ void __miss__ms() {
     // concave case needs further investigation
-    setMediumID(0);
+    optixSetPayload_1(INVALID_TRIANGLE);
 }

@@ -10,8 +10,10 @@ typedef struct __attribute__((aligned(16))) MMC_OptiX_Ray {
     float3 p0;                    /**< current photon position */
     float3 dir;                   /**< current photon direction vector */
     float slen;                   /**< the remaining unitless scattering length = length*mus */
+    float hitlen;                 /**< distance to the next intersection */
     float weight;                 /**< photon current weight */
     float photontimer;            /**< the total time-of-fly of the photon */
+    unsigned int triangleid;      /**< id of the hit triangle, uint_max if no triangle is hit */
     unsigned int mediumid;        /**< ID of current medium type */
 } optixray;
 
@@ -19,9 +21,7 @@ typedef struct __attribute__((aligned(16))) MMC_OptiX_Ray {
  * @brief Get photon position
  */
 __device__ __forceinline__ float3 getPosition() {
-    return make_float3(__uint_as_float(optixGetPayload_0()),
-                       __uint_as_float(optixGetPayload_1()),
-                       __uint_as_float(optixGetPayload_2()));
+    return optixGetWorldRayOrigin();
 }
 
 /**
@@ -37,9 +37,7 @@ __device__ __forceinline__ void setPosition(const float3 &p) {
  * @brief Get ray direction
  */
 __device__ __forceinline__ float3 getDirection() {
-    return make_float3(__uint_as_float(optixGetPayload_3()),
-                       __uint_as_float(optixGetPayload_4()),
-                       __uint_as_float(optixGetPayload_5()));
+    return optixGetWorldRayDirection();
 }
 
 /**

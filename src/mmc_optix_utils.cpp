@@ -266,7 +266,7 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
     optixcfg->pipelineCompileOptions.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     optixcfg->pipelineCompileOptions.usesMotionBlur     = false;
-    optixcfg->pipelineCompileOptions.numPayloadValues   = 14;
+    optixcfg->pipelineCompileOptions.numPayloadValues   = 2;
     optixcfg->pipelineCompileOptions.numAttributeValues = 2;  // for triangle
 #ifndef NDEBUG
     optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_DEBUG |
@@ -525,10 +525,20 @@ void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
     // ==================================================================
     std::vector<RaygenRecord> raygenRecords;
     for (size_t i = 0;i < optixcfg->raygenPGs.size();i++) {
-      RaygenRecord rec;
-      OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->raygenPGs[i],&rec));
-      rec.data = nullptr;
-      raygenRecords.push_back(rec);
+        RaygenRecord rec;
+        OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->raygenPGs[i],&rec));
+
+        // node, face and media types
+        rec.data.node = (float3*)optixcfg->vertexBuffer.d_pointer();
+        uint4 *face = (uint4*)calloc(mesh->nface, sizeof(uint4));
+        for (size_t i = 0; i < mesh->nface; ++i) {
+            face[i] = make_uint4(mesh->face[i].x, mesh->face[i].y, mesh->face[i].z,
+                (mesh->front[i] << 16) | (0xFF & mesh->back[i]));
+        }
+        optixcfg->faceBuffer.alloc_and_upload(face, mesh->nface);
+        rec.data.face = (uint4*)optixcfg->faceBuffer.d_pointer();
+
+        raygenRecords.push_back(rec);
     }
     optixcfg->raygenRecordsBuffer.alloc_and_upload(raygenRecords);
     optixcfg->sbt.raygenRecord = optixcfg->raygenRecordsBuffer.d_pointer();
@@ -540,7 +550,7 @@ void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
     for (size_t i = 0;i < optixcfg->missPGs.size();i++) {
       MissRecord rec;
       OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->missPGs[i],&rec));
-      rec.data = nullptr; /* for now ... */
+      rec.data = nullptr;
       missRecords.push_back(rec);
     }
     optixcfg->missRecordsBuffer.alloc_and_upload(missRecords);
@@ -552,21 +562,12 @@ void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
     // build hitgroup records
     // ==================================================================
     std::vector<HitgroupRecord> hitgroupRecords;
-    HitgroupRecord rec;
-    // all meshes use the same code, so all same hit group
-    OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->hitgroupPGs[0],&rec));
-    rec.data.node = (float3*)optixcfg->vertexBuffer.d_pointer();
-
-    // combine face + front + back into a uint4 array
-    uint4 *face = (uint4*)calloc(mesh->nface, sizeof(uint4));
-    for (size_t i = 0; i < mesh->nface; ++i) {
-        face[i] = make_uint4(mesh->face[i].x, mesh->face[i].y, mesh->face[i].z,
-            (mesh->front[i] << 16) | (0xFF & mesh->back[i]));
+    for (size_t i = 0;i < optixcfg->hitgroupPGs.size();i++) {
+        HitgroupRecord rec;
+        OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->hitgroupPGs[i],&rec));
+        rec.data = nullptr;
+        hitgroupRecords.push_back(rec);
     }
-    optixcfg->faceBuffer.alloc_and_upload(face, mesh->nface);
-    rec.data.face = (uint4*)optixcfg->faceBuffer.d_pointer();
-    hitgroupRecords.push_back(rec);
-
     optixcfg->hitgroupRecordsBuffer.alloc_and_upload(hitgroupRecords);
     optixcfg->sbt.hitgroupRecordBase          = optixcfg->hitgroupRecordsBuffer.d_pointer();
     optixcfg->sbt.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
