@@ -38,19 +38,6 @@ __device__ __forceinline__ void launchPhoton(optixray &r, mcx::Random &rng) {
 }
 
 /**
- * @brief Move a photon one step forward
- */
-__device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
-    optixTrace(gcfg.gashandle, r.p0, r.dir, 0.0001f, std::numeric_limits<float>::max(),
-        0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_NONE, 0, 1, 0,
-        *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
-        *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
-        *(uint32_t*)&(r.slen), *(uint32_t*)&(r.weight), *(uint32_t*)&(r.photontimer),
-        r.mediumid,
-        rng.intSeed.x, rng.intSeed.y, rng.intSeed.z, rng.intSeed.w);
-}
-
-/**
  * @brief Rotate a vector with given azimuth and zenith angles
  */
 __device__ __forceinline__ float3 rotateVector(const float3 &vec, const float2 &zen, 
@@ -181,6 +168,22 @@ __device__ __forceinline__ void accumulateOutput(const optixray &r, const Medium
 }
 
 /**
+ * @brief Move a photon one step forward
+ */
+__device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
+    optixTrace(OPTIX_PAYLOAD_TYPE_ID_0, gcfg.gashandle, r.p0, r.dir,
+        0.0001f, std::numeric_limits<float>::max(),
+        0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_NONE, 0, 1, 0,
+        *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
+        *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
+        *(uint32_t*)&(r.slen),
+        *(uint32_t*)&(r.weight),
+        *(uint32_t*)&(r.photontimer),
+        r.mediumid,
+        rng.intSeed.x, rng.intSeed.y, rng.intSeed.z, rng.intSeed.w);
+}
+
+/**
  * @brief Launch photon and trace ray iteratively
  */
 extern "C" __global__ void __raygen__rg() {
@@ -210,6 +213,7 @@ extern "C" __global__ void __raygen__rg() {
  * @brief when a photon hits a triangle
  */
 extern "C" __global__ void __closesthit__ch() {
+    optixSetPayloadTypes(OPTIX_PAYLOAD_TYPE_ID_0);
     // get photon and ray information from payload
     optixray r = getRay();
 
@@ -279,6 +283,7 @@ extern "C" __global__ void __closesthit__ch() {
 }
 
 extern "C" __global__ void __miss__ms() {
+    optixSetPayloadTypes(OPTIX_PAYLOAD_TYPE_ID_0);
     // concave case needs further investigation
     setMediumID(0);
 }

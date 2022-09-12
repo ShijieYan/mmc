@@ -268,7 +268,43 @@ void createContext(mcconfig* cfg, OptixParams* optixcfg) {
  * @brief creates the module that contains all programs
  */
 void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
+    // payload semantics
+    const unsigned int mmcpayloadsemantics[14] =
+    {
+        // photon position (payload 0-2)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        // ray direction (payload 3-5)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        // remaining scattering length  (payload 6)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        // photon weight (payload 7)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        // time of flight (payload 8)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        // medium ID (payload 9)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE |
+            OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+        // random seed (payload 10-13)
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+        OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE
+    };
+
+    // we have only one optixTrace call
+    OptixPayloadType payloadtypes[1] = {};
+    payloadtypes[0].numPayloadValues = sizeof(mmcpayloadsemantics) /
+                                           sizeof(mmcpayloadsemantics[0]);
+    payloadtypes[0].payloadSemantics = mmcpayloadsemantics;
+
     // moduleCompileOptions
+    optixcfg->moduleCompileOptions.numPayloadTypes = 1;
+    optixcfg->moduleCompileOptions.payloadTypes = payloadtypes;
+
     optixcfg->moduleCompileOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
 #ifndef NDEBUG
     optixcfg->moduleCompileOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
@@ -283,7 +319,7 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
     optixcfg->pipelineCompileOptions.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     optixcfg->pipelineCompileOptions.usesMotionBlur     = false;
-    optixcfg->pipelineCompileOptions.numPayloadValues   = 14;
+    optixcfg->pipelineCompileOptions.numPayloadValues   = 0;
     optixcfg->pipelineCompileOptions.numAttributeValues = 2;  // for triangle
 #ifndef NDEBUG
     optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_DEBUG |
