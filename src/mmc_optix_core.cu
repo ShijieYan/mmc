@@ -41,7 +41,7 @@ __device__ __forceinline__ void launchPhoton(optixray &r, mcx::Random &rng) {
  * @brief Move a photon one step forward
  */
 __device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
-    optixTrace(gcfg.gashandle, r.p0, r.dir, 0.0001f, std::numeric_limits<float>::max(),
+    optixTrace(gcfg.gashandle, r.p0, r.dir, 0.0f, std::numeric_limits<float>::max(),
         0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_NONE, 0, 1, 0,
         *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
         *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
@@ -238,9 +238,6 @@ extern "C" __global__ void __closesthit__ch() {
     // save output
     accumulateOutput(r, currprop, lmove);
 
-    // update photon position
-    r.p0 += r.dir * lmove;
-
     // update photon weight
     r.weight *= expf(-currprop.mua * lmove);
 
@@ -252,20 +249,17 @@ extern "C" __global__ void __closesthit__ch() {
         // after hitting a boundary, update remaining scattering length
         r.slen -= lmove * currprop.mus;
 
-        // triangle nodes
-        const float3 &v0 = sbtData.node[index.x];
-        const float3 &v1 = sbtData.node[index.y];
-        const float3 &v2 = sbtData.node[index.z];
-
-        // get intersection (barycentric coordinate)
-        const float2 bary = optixGetTriangleBarycentrics();
-        r.p0 = (1.0f - bary.x - bary.y) * v0 + bary.x * v1 + bary.y * v2;
+        // update photon position
+        r.p0 += r.dir * (lmove + 0.0001f);
 
         // update medium id (assume matched boundary)
         r.mediumid = optixIsFrontFaceHit() ? (index.w & 0xFFFF) : (index.w >> 16);
 
         // todo: update ray direction at a mismatched boundary
     } else {
+        // update photon position
+        r.p0 += r.dir * lmove;
+
         // after a scattering event, new direction and scattering length
         r.dir = selectScatteringDirection(r.dir, currprop.g, rng);
         r.slen = rng.rand_next_scatlen();
@@ -279,6 +273,11 @@ extern "C" __global__ void __closesthit__ch() {
 }
 
 extern "C" __global__ void __miss__ms() {
+    const float hitT = optixGetRayTmax();
+    const float3 rayorigin = optixGetWorldRayOrigin();
+    const float3 raydir = optixGetWorldRayDirection();
+    printf("miss detected, ray origin:[%f %f %f], ray direction:[%f %f %f], hitT: %f\n",
+        rayorigin.x, rayorigin.y, rayorigin.z, raydir.x, raydir.y, raydir.z, hitT);
     // concave case needs further investigation
     setMediumID(0);
 }
