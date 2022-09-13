@@ -1,0 +1,25 @@
+{
+	"Session":{
+		"ID":"optix",
+		"DoMismatch":0,
+		"OutputType":"energy",
+		"RayTracer":"grid",
+		"Photons":100000000,
+    "RNGSeed":3
+	},
+	"Mesh":{
+		"MeshID":"optix",
+		"InitElem":927
+	},
+	"Forward":{
+		"T0":0,
+		"T1":5e-09,
+		"Dt":5e-10
+	},
+	"Optode":{
+		"Source":{
+			"Pos":[30,30,0.01],
+			"Dir":[0,0,1]
+		}
+	}
+}
