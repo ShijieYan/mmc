@@ -270,7 +270,7 @@ extern "C" __global__ void __closesthit__ch() {
     // get info of triangle, including face normal, neighbouring medium
     const TriangleMeshSBTData &sbtData =
         *(const TriangleMeshSBTData*)optixGetSbtDataPointer();
-    float4 fnorm = sbtData.fnorm[gcfg.gasoffset[r.mediumid] + primid];
+    float4 fnorm = sbtData.fnorm[gcfg.sbtoffset[r.mediumid] + primid];
     const uint nbmed = __float_as_uint(fnorm.w);
 
     // get medium properties

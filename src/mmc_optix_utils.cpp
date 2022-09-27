@@ -49,9 +49,10 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
 
     surfmesh *smesh = (surfmesh*)calloc((mesh->prop + 1), sizeof(surfmesh));
     prepareSurfMesh(mesh, smesh);
+    optixcfg.launchParams.sbtoffset[0] = 0;
     for (int i = 0; i <= mesh->prop; ++i) {
         optixcfg.launchParams.gashandle[i] = buildAccel(smesh + i, &optixcfg);
-        optixcfg.launchParams.gasoffset[i + 1] = optixcfg.launchParams.gasoffset[i] +
+        optixcfg.launchParams.sbtoffset[i + 1] = optixcfg.launchParams.sbtoffset[i] +
                                                  smesh[i].norm.size();
     }
 
