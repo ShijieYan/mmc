@@ -4,6 +4,10 @@
 #include <cstring>
 #include <optix_function_table_definition.h>
 #include <iomanip>
+#include <unordered_map>
+#include <unordered_set>
+#include <sutil/vec_math.h>
+#include <limits.h>
 #ifdef _OPENMP
     #include <omp.h>
 #endif
@@ -14,6 +18,8 @@
 #include "incbin.h"
 
 INCTXT(mmcShaderPtx, mmcShaderPtxSize, "built/mmc_optix_core.ptx");
+const int out[4][3] = {{0, 3, 1}, {3, 2, 1}, {0, 2, 3}, {0, 1, 2}};
+const int ifaceorder[] = {3, 0, 2, 1};
 
 void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUInfo* gpu,
     void (*progressfun)(float, void*), void* handle) {
@@ -41,7 +47,13 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
 
-    optixcfg.launchParams.gashandle = buildAccel(mesh, &optixcfg);
+    surfmesh *smesh = (surfmesh*)calloc((mesh->prop + 1), sizeof(surfmesh));
+    prepareSurfMesh(mesh, smesh);
+    for (int i = 0; i <= mesh->prop; ++i) {
+        optixcfg.launchParams.gashandle[i] = buildAccel(smesh + i, &optixcfg);
+        optixcfg.launchParams.gasoffset[i] = smesh[i].norm.size();
+    }
+
     MMC_FPRINTF(cfg->flog, "optix acceleration structure complete:  \t%d ms\n",
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
@@ -51,7 +63,8 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
 
-    buildSBT(mesh, &optixcfg);
+    buildSBT(mesh, smesh, &optixcfg);
+    free(smesh);
     MMC_FPRINTF(cfg->flog, "optix shader binding table complete:  \t%d ms\n",
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
@@ -134,6 +147,90 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
 }
 
 /**
+ * @brief extract surface mesh for each medium
+ */
+void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
+    int *fnb = (int*)calloc(tmesh->ne * tmesh->elemlen, sizeof(int));
+    memcpy(fnb, tmesh->facenb, (tmesh->ne * tmesh->elemlen) * sizeof(int));
+
+    std::unordered_map<unsigned int, std::unordered_set<unsigned int>> nodeprevidx;
+    float3 v0, v1, v2, vec01, vec02, vnorm;
+    for (int i = 0; i < tmesh->ne; ++i) {
+        // iterate over each tetrahedra
+        unsigned int currmedid = tmesh->type[i];
+        for(int j = 0; j < tmesh->elemlen; ++j){
+            // iterate over each triangle
+            int nexteid = fnb[(i * tmesh->elemlen) + j];
+            if (nexteid == INT_MIN) continue;
+            unsigned int nextmedid = ((nexteid < 0) ? 0 : tmesh->type[nexteid - 1]);
+            if(currmedid != nextmedid) {
+                // face nodes
+                unsigned int n0 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
+                unsigned int n1 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
+                unsigned int n2 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
+                nodeprevidx[currmedid].insert(n0);
+                nodeprevidx[currmedid].insert(n1);
+                nodeprevidx[currmedid].insert(n2);
+                nodeprevidx[nextmedid].insert(n0);
+                nodeprevidx[nextmedid].insert(n1);
+                nodeprevidx[nextmedid].insert(n2);
+
+                // faces
+                smesh[currmedid].face.push_back(make_uint3(n0, n1, n2));
+                smesh[nextmedid].face.push_back(make_uint3(n0, n2, n1));
+
+                // face norm: pointing from back to front
+                v0 = *(float3*)&tmesh->node[n0];
+                v1 = *(float3*)&tmesh->fnode[n1];
+                v2 = *(float3*)&tmesh->fnode[n2];
+                vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v1, (MMCfloat3*)&vec01);
+                vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v2, (MMCfloat3*)&vec02);
+                vec_cross((MMCfloat3*)&vec01, (MMCfloat3*)&vec02, (MMCfloat3*)&vnorm);
+                float mag = 1.0f / sqrtf(vec_dot((MMCfloat3*)&vnorm, (MMCfloat3*)&vnorm));
+                vec_mult((MMCfloat3*)&vnorm, mag, (MMCfloat3*)&vnorm);
+                smesh[currmedid].norm.push_back(vnorm);
+                smesh[nextmedid].norm.push_back(-vnorm);
+
+                // neighbour medium types
+                smesh[currmedid].nbtype.push_back(nextmedid);
+                smesh[nextmedid].nbtype.push_back(currmedid);
+
+                fnb[(i * tmesh->elemlen) + j] = INT_MIN;
+                if(nexteid > 0){
+                    for(int k = 0; k < tmesh->elemlen; ++k){
+                        if(fnb[((nexteid - 1) * tmesh->elemlen) + k] == i + 1) {
+                            fnb[((nexteid - 1) * tmesh->elemlen) + k] = INT_MIN;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // renumber node and face for each medium type
+    for (int i = 0; i <= tmesh->prop; ++i) {
+        // renumbering node
+        std::unordered_map<unsigned int, unsigned int> indexmap;
+        unsigned int curridx = 0;
+        for (auto previdx : nodeprevidx[i]) {
+            if (indexmap.insert({previdx, curridx}).second) {
+                smesh[i].node.push_back(*(float3*)&tmesh->node[previdx]);
+                ++curridx;
+            }
+        }
+        // update node indices
+        for (size_t j = 0; j < smesh[i].face.size(); ++j) {
+            smesh[i].face[j] = make_uint3(indexmap[smesh[i].face[j].x],
+                                          indexmap[smesh[i].face[j].y],
+                                          indexmap[smesh[i].face[j].z]);
+        }
+        printf("type %d:\n", i);
+        printSurfMesh(smesh[i]);
+    }
+}
+
+/**
  * @brief prepare launch parameters
  */
 void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
@@ -148,7 +245,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     }
 
     // set up optical properties
-    if (mesh->prop + 1 > MAX_PROP) {
+    if (mesh->prop + 1 > MAX_PROP_OPTIX) {
         mcx_error(-1, "Medium type count exceeds limit.", __FILE__, __LINE__);
     }
     for (int i = 0; i <= mesh->prop; ++i) {
@@ -203,8 +300,8 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     if (cfg->autopilot)
         totalthread = gpu[gpuid].autothread;
 
-    optixcfg->launchWidth = totalthread;
-    optixcfg->launchParams.threadphoton = cfg->nphoton / totalthread;
+    optixcfg->launchWidth = 1;
+    optixcfg->launchParams.threadphoton = cfg->nphoton / optixcfg->launchWidth;
     optixcfg->launchParams.oddphoton =
         cfg->nphoton - optixcfg->launchParams.threadphoton * totalthread;
 
@@ -221,7 +318,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     } else {
         srand(time(0));
     }
-    uint4 *hseed = (uint4 *)malloc(sizeof(uint4) * totalthread);
+    uint4 *hseed = (uint4 *)calloc(totalthread, sizeof(uint4));
     for (int i = 0; i < totalthread; ++i) {
         hseed[i] = make_uint4(rand(), rand(), rand(), rand());
     }
@@ -277,13 +374,13 @@ void createContext(mcconfig* cfg, OptixParams* optixcfg) {
                                           << "][" << std::setw( 12 ) << tag << "]: "
                                           << message << "\n";
                                   };
-#ifndef NDEBUG
+// #ifndef NDEBUG
     options.logCallbackLevel = 4;
     options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
-#else
-    options.logCallbackLevel = 0;
-    options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-#endif
+// #else
+//     options.logCallbackLevel = 0;
+//     options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+// #endif
 
     OPTIX_CHECK(optixDeviceContextCreate(optixcfg->cudaContext, &options,
         &optixcfg->optixContext));
@@ -295,13 +392,13 @@ void createContext(mcconfig* cfg, OptixParams* optixcfg) {
 void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
     // moduleCompileOptions
     optixcfg->moduleCompileOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-#ifndef NDEBUG
+// #ifndef NDEBUG
     optixcfg->moduleCompileOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
     optixcfg->moduleCompileOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-#else
-    optixcfg->moduleCompileOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-    optixcfg->moduleCompileOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_3;
-#endif
+// #else
+//     optixcfg->moduleCompileOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+//     optixcfg->moduleCompileOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_3;
+// #endif
 
     // pipelineCompileOptions
     optixcfg->pipelineCompileOptions = {};
@@ -310,12 +407,12 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
     optixcfg->pipelineCompileOptions.usesMotionBlur     = false;
     optixcfg->pipelineCompileOptions.numPayloadValues   = 14;
     optixcfg->pipelineCompileOptions.numAttributeValues = 2;  // for triangle
-#ifndef NDEBUG
+// #ifndef NDEBUG
     optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_DEBUG |
         OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
-#else
-    optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
-#endif
+// #else
+//     optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+// #endif
     optixcfg->pipelineCompileOptions.pipelineLaunchParamsVariableName = "gcfg";
 
     // pipelineLinkOptions
@@ -413,14 +510,14 @@ void createHitgroupPrograms(OptixParams* optixcfg) {
 /**
  * @brief set up acceleration structures
  */
-OptixTraversableHandle buildAccel(tetmesh* mesh, OptixParams* optixcfg) {
+OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
     // ==================================================================
     // upload the model to the device
     // note: mesh->fnode needs to be float3
     // mesh->face needs to be uint3 (zero-indexed)
     // ==================================================================
-    optixcfg->vertexBuffer.alloc_and_upload(mesh->fnode, mesh->nn);
-    optixcfg->indexBuffer.alloc_and_upload(mesh->face, mesh->nface);
+    optixcfg->vertexBuffer.alloc_and_upload(smesh->node);
+    optixcfg->indexBuffer.alloc_and_upload(smesh->face);
 
     OptixTraversableHandle asHandle {0};
 
@@ -437,12 +534,12 @@ OptixTraversableHandle buildAccel(tetmesh* mesh, OptixParams* optixcfg) {
 
     triangleInput.triangleArray.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
     triangleInput.triangleArray.vertexStrideInBytes = sizeof(float3);
-    triangleInput.triangleArray.numVertices         = mesh->nn;
+    triangleInput.triangleArray.numVertices         = smesh->node.size();
     triangleInput.triangleArray.vertexBuffers       = &d_vertices;
 
     triangleInput.triangleArray.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
     triangleInput.triangleArray.indexStrideInBytes  = sizeof(uint3);
-    triangleInput.triangleArray.numIndexTriplets    = mesh->nface;
+    triangleInput.triangleArray.numIndexTriplets    = smesh->face.size();
     triangleInput.triangleArray.indexBuffer         = d_indices;
 
     uint32_t triangleInputFlags[1] = { 0 }; // OPTIX_GEOMETRY_FLAG_NONE?
@@ -561,7 +658,7 @@ void createPipeline(OptixParams* optixcfg) {
 /**
  * @ set up the shader binding table
  */
-void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
+void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
     // ==================================================================
     // build raygen records
     // ==================================================================
@@ -599,13 +696,17 @@ void buildSBT(tetmesh* mesh, OptixParams* optixcfg) {
     OPTIX_CHECK(optixSbtRecordPackHeader(optixcfg->hitgroupPGs[0],&rec));
 
     // combine face normal + front + back into a float4 array
-    float4 *fnorm = (float4*)calloc(mesh->nface, sizeof(float4));
-    for (size_t i = 0; i < mesh->nface; ++i) {
-        uint media = (mesh->front[i] << 16) | (0xFF & mesh->back[i]);
-        fnorm[i] = make_float4(mesh->fnorm[i].x, mesh->fnorm[i].y, mesh->fnorm[i].z,
-            *(float*)&media);
+    std::vector<float4> fnorm;
+    for (int i = 0; i <= mesh->prop; ++i) {
+        printf("type %d:\n", i);
+        for (size_t j = 0; j < smesh[i].norm.size(); ++j) {
+            fnorm.push_back(make_float4(smesh[i].norm[j].x, smesh[i].norm[j].y,
+                smesh[i].norm[j].z, *(float*)&smesh[i].nbtype[j]));
+            float4 tail = fnorm.back();
+            printf("fnorm = [%f %f %f %u]\n", tail.x, tail.y, tail.z, *(uint*)&tail.w);
+        }
     }
-    optixcfg->faceBuffer.alloc_and_upload(fnorm, mesh->nface);
+    optixcfg->faceBuffer.alloc_and_upload(fnorm);
     rec.data.fnorm = (float4*)optixcfg->faceBuffer.d_pointer();
     hitgroupRecords.push_back(rec);
 
@@ -630,4 +731,22 @@ void clearOptixParams(OptixParams* optixcfg) {
     optixcfg->seedBuffer.free();
     optixcfg->outputBuffer.free();
     free(optixcfg->outputHostBuffer);
+}
+
+void printSurfMesh(const surfmesh &smesh) {
+    printf("vertices:\n");
+    int count = 0;
+    for (auto v : smesh.node) {
+        printf("#%3d:[%f %f %f]\n", count++, v.x, v.y, v.z);
+    }
+    printf("faces:\n");
+    count = 0;
+    for (auto f : smesh.face) {
+        printf("#%3d:[%u %u %u]\n", count++, f.x, f.y, f.z);
+    }
+    printf("norm:\n");
+    count = 0;
+    for (auto n : smesh.norm) {
+        printf("#%3d:[%f %f %f]\n", count++, n.x, n.y, n.z);
+    }
 }

@@ -6,6 +6,7 @@
 #include "CUDABuffer.h"
 #include "mmc_optix_launchparam.h"
 #include "optix7.h"
+#include <vector>
 
 /*! SBT record for a raygen program */
 struct __align__( OPTIX_SBT_RECORD_ALIGNMENT ) RaygenRecord
@@ -82,10 +83,19 @@ struct OptixParams {
     osc::CUDABuffer outputBuffer;
 };
 
+typedef struct surfaceMesh {
+    std::vector<float3> node;
+    std::vector<uint3> face;
+    std::vector<float3> norm;
+    std::vector<unsigned int> nbtype;
+} surfmesh;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+
+void printSurfMesh(const surfmesh &smesh);
 void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer,
     GPUInfo* gpu, void (*progressfun)(float, void*), void* handle);
 
@@ -95,9 +105,10 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode);
 void createRaygenPrograms(OptixParams* optixcfg);
 void createMissPrograms(OptixParams* optixcfg);
 void createHitgroupPrograms(OptixParams* optixcfg);
-OptixTraversableHandle buildAccel(tetmesh* mesh, OptixParams* optixcfg);
+void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh);
+OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg);
 void createPipeline(OptixParams* optixcfg);
-void buildSBT(tetmesh* mesh, OptixParams* optixcfg);
+void buildSBT(tetmesh* tmesh, surfmesh* smesh, OptixParams* optixcfg);
 void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     OptixParams *optixcfg);
 void clearOptixParams(OptixParams* optixcfg);
