@@ -83,6 +83,7 @@ struct OptixParams {
     osc::CUDABuffer outputBuffer;
 };
 
+// struct for surface mesh of each medium
 typedef struct surfaceMesh {
     std::vector<float3> node;
     std::vector<uint3> face;
@@ -94,8 +95,6 @@ typedef struct surfaceMesh {
 extern "C" {
 #endif
 
-
-void printSurfMesh(const surfmesh &smesh);
 void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer,
     GPUInfo* gpu, void (*progressfun)(float, void*), void* handle);
 

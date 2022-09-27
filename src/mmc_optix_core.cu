@@ -257,7 +257,6 @@ extern "C" __global__ void __raygen__rg() {
 extern "C" __global__ void __closesthit__ch() {
     // get photon and ray information from payload
     optixray r = getRay();
-    // printRay(r);
 
     // get rng
     mcx::Random rng = getRNG();
@@ -273,8 +272,6 @@ extern "C" __global__ void __closesthit__ch() {
         *(const TriangleMeshSBTData*)optixGetSbtDataPointer();
     float4 fnorm = sbtData.fnorm[gcfg.gasoffset[r.mediumid] + primid];
     const uint nbmed = __float_as_uint(fnorm.w);
-    // printf("hitlen:%e, triangle id: %d, norm:[%f %f %f], nbmed: %u\n",
-    //     hitlen, primid, fnorm.x, fnorm.y, fnorm.z, nbmed);
 
     // get medium properties
     const Medium currprop = gcfg.medium[r.mediumid];

@@ -51,7 +51,8 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
     prepareSurfMesh(mesh, smesh);
     for (int i = 0; i <= mesh->prop; ++i) {
         optixcfg.launchParams.gashandle[i] = buildAccel(smesh + i, &optixcfg);
-        optixcfg.launchParams.gasoffset[i] = smesh[i].norm.size();
+        optixcfg.launchParams.gasoffset[i + 1] = optixcfg.launchParams.gasoffset[i] +
+                                                 smesh[i].norm.size();
     }
 
     MMC_FPRINTF(cfg->flog, "optix acceleration structure complete:  \t%d ms\n",
@@ -225,8 +226,6 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
                                           indexmap[smesh[i].face[j].y],
                                           indexmap[smesh[i].face[j].z]);
         }
-        printf("type %d:\n", i);
-        printSurfMesh(smesh[i]);
     }
 }
 
@@ -300,7 +299,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
     if (cfg->autopilot)
         totalthread = gpu[gpuid].autothread;
 
-    optixcfg->launchWidth = 1;
+    optixcfg->launchWidth = totalthread;
     optixcfg->launchParams.threadphoton = cfg->nphoton / optixcfg->launchWidth;
     optixcfg->launchParams.oddphoton =
         cfg->nphoton - optixcfg->launchParams.threadphoton * totalthread;
@@ -698,12 +697,9 @@ void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
     // combine face normal + front + back into a float4 array
     std::vector<float4> fnorm;
     for (int i = 0; i <= mesh->prop; ++i) {
-        printf("type %d:\n", i);
         for (size_t j = 0; j < smesh[i].norm.size(); ++j) {
             fnorm.push_back(make_float4(smesh[i].norm[j].x, smesh[i].norm[j].y,
                 smesh[i].norm[j].z, *(float*)&smesh[i].nbtype[j]));
-            float4 tail = fnorm.back();
-            printf("fnorm = [%f %f %f %u]\n", tail.x, tail.y, tail.z, *(uint*)&tail.w);
         }
     }
     optixcfg->faceBuffer.alloc_and_upload(fnorm);
@@ -731,22 +727,4 @@ void clearOptixParams(OptixParams* optixcfg) {
     optixcfg->seedBuffer.free();
     optixcfg->outputBuffer.free();
     free(optixcfg->outputHostBuffer);
-}
-
-void printSurfMesh(const surfmesh &smesh) {
-    printf("vertices:\n");
-    int count = 0;
-    for (auto v : smesh.node) {
-        printf("#%3d:[%f %f %f]\n", count++, v.x, v.y, v.z);
-    }
-    printf("faces:\n");
-    count = 0;
-    for (auto f : smesh.face) {
-        printf("#%3d:[%u %u %u]\n", count++, f.x, f.y, f.z);
-    }
-    printf("norm:\n");
-    count = 0;
-    for (auto n : smesh.norm) {
-        printf("#%3d:[%f %f %f]\n", count++, n.x, n.y, n.z);
-    }
 }
