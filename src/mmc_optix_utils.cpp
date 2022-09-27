@@ -511,6 +511,8 @@ void createHitgroupPrograms(OptixParams* optixcfg) {
  * @brief set up acceleration structures
  */
 OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
+    OptixTraversableHandle asHandle {0};
+    if (smesh->face.empty()) return asHandle;
     // ==================================================================
     // upload the model to the device
     // note: mesh->fnode needs to be float3
@@ -518,8 +520,6 @@ OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
     // ==================================================================
     optixcfg->vertexBuffer.alloc_and_upload(smesh->node);
     optixcfg->indexBuffer.alloc_and_upload(smesh->face);
-
-    OptixTraversableHandle asHandle {0};
 
     // ==================================================================
     // triangle inputs
