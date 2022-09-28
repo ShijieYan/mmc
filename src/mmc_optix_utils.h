@@ -105,7 +105,7 @@ void createRaygenPrograms(OptixParams* optixcfg);
 void createMissPrograms(OptixParams* optixcfg);
 void createHitgroupPrograms(OptixParams* optixcfg);
 void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh);
-OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg);
+OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* optixcfg);
 void createPipeline(OptixParams* optixcfg);
 void buildSBT(tetmesh* tmesh, surfmesh* smesh, OptixParams* optixcfg);
 void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,

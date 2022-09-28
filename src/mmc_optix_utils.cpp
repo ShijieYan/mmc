@@ -51,7 +51,7 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
     prepareSurfMesh(mesh, smesh);
     optixcfg.launchParams.sbtoffset[0] = 0;
     for (int i = 0; i <= mesh->prop; ++i) {
-        optixcfg.launchParams.gashandle[i] = buildAccel(smesh + i, &optixcfg);
+        optixcfg.launchParams.gashandle[i] = buildAccel(mesh, smesh + i, &optixcfg);
         optixcfg.launchParams.sbtoffset[i + 1] = optixcfg.launchParams.sbtoffset[i] +
                                                  smesh[i].norm.size();
     }
@@ -155,7 +155,6 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
     int *fnb = (int*)calloc(tmesh->ne * tmesh->elemlen, sizeof(int));
     memcpy(fnb, tmesh->facenb, (tmesh->ne * tmesh->elemlen) * sizeof(int));
 
-    std::unordered_map<unsigned int, std::unordered_set<unsigned int>> nodeprevidx;
     float3 v0, v1, v2, vec01, vec02, vnorm;
     for (int i = 0; i < tmesh->ne; ++i) {
         // iterate over each tetrahedra
@@ -170,18 +169,12 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
                 unsigned int n0 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
                 unsigned int n1 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
                 unsigned int n2 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
-                nodeprevidx[currmedid].insert(n0);
-                nodeprevidx[currmedid].insert(n1);
-                nodeprevidx[currmedid].insert(n2);
-                nodeprevidx[nextmedid].insert(n0);
-                nodeprevidx[nextmedid].insert(n1);
-                nodeprevidx[nextmedid].insert(n2);
 
-                // faces
+                // face vertex indices
                 smesh[currmedid].face.push_back(make_uint3(n0, n1, n2));
                 smesh[nextmedid].face.push_back(make_uint3(n0, n2, n1));
 
-                // face norm: pointing from back to front
+                // outward-pointing face norm
                 v0 = *(float3*)&tmesh->fnode[n0];
                 v1 = *(float3*)&tmesh->fnode[n1];
                 v2 = *(float3*)&tmesh->fnode[n2];
@@ -207,25 +200,6 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
                     }
                 }
             }
-        }
-    }
-
-    // renumber node and face for each medium type
-    for (int i = 0; i <= tmesh->prop; ++i) {
-        // renumbering node
-        std::unordered_map<unsigned int, unsigned int> indexmap;
-        unsigned int curridx = 0;
-        for (auto previdx : nodeprevidx[i]) {
-            if (indexmap.insert({previdx, curridx}).second) {
-                smesh[i].node.push_back(*(float3*)&tmesh->node[previdx]);
-                ++curridx;
-            }
-        }
-        // update node indices
-        for (size_t j = 0; j < smesh[i].face.size(); ++j) {
-            smesh[i].face[j] = make_uint3(indexmap[smesh[i].face[j].x],
-                                          indexmap[smesh[i].face[j].y],
-                                          indexmap[smesh[i].face[j].z]);
         }
     }
 }
@@ -510,7 +484,7 @@ void createHitgroupPrograms(OptixParams* optixcfg) {
 /**
  * @brief set up acceleration structures
  */
-OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
+OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* optixcfg) {
     OptixTraversableHandle asHandle {0};
     if (smesh->face.empty()) return asHandle;
     // ==================================================================
@@ -518,7 +492,7 @@ OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
     // note: mesh->fnode needs to be float3
     // mesh->face needs to be uint3 (zero-indexed)
     // ==================================================================
-    optixcfg->vertexBuffer.alloc_and_upload(smesh->node);
+    optixcfg->vertexBuffer.alloc_and_upload(tmesh->fnode, tmesh->nn);
     optixcfg->indexBuffer.alloc_and_upload(smesh->face);
 
     // ==================================================================
@@ -534,7 +508,7 @@ OptixTraversableHandle buildAccel(surfmesh* smesh, OptixParams* optixcfg) {
 
     triangleInput.triangleArray.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
     triangleInput.triangleArray.vertexStrideInBytes = sizeof(float3);
-    triangleInput.triangleArray.numVertices         = smesh->node.size();
+    triangleInput.triangleArray.numVertices         = tmesh->nn;
     triangleInput.triangleArray.vertexBuffers       = &d_vertices;
 
     triangleInput.triangleArray.indexFormat         = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
