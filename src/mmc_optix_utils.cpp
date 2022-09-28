@@ -49,11 +49,10 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
 
     surfmesh *smesh = (surfmesh*)calloc((mesh->prop + 1), sizeof(surfmesh));
     prepareSurfMesh(mesh, smesh);
-    optixcfg.launchParams.sbtoffset[0] = 0;
+    unsigned int primitiveoffset = 0;
     for (int i = 0; i <= mesh->prop; ++i) {
-        optixcfg.launchParams.gashandle[i] = buildAccel(mesh, smesh + i, &optixcfg);
-        optixcfg.launchParams.sbtoffset[i + 1] = optixcfg.launchParams.sbtoffset[i] +
-                                                 smesh[i].norm.size();
+        optixcfg.launchParams.gashandle[i] = buildAccel(mesh, smesh + i, &optixcfg, primitiveoffset);
+        primitiveoffset += smesh[i].norm.size();
     }
 
     MMC_FPRINTF(cfg->flog, "optix acceleration structure complete:  \t%d ms\n",
@@ -484,7 +483,8 @@ void createHitgroupPrograms(OptixParams* optixcfg) {
 /**
  * @brief set up acceleration structures
  */
-OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* optixcfg) {
+OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* optixcfg,
+    unsigned int primitiveoffset) {
     OptixTraversableHandle asHandle {0};
     if (smesh->face.empty()) return asHandle;
     // ==================================================================
@@ -525,6 +525,7 @@ OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* 
     triangleInput.triangleArray.sbtIndexOffsetBuffer        = 0;
     triangleInput.triangleArray.sbtIndexOffsetSizeInBytes   = 0;
     triangleInput.triangleArray.sbtIndexOffsetStrideInBytes = 0;
+    triangleInput.triangleArray.primitiveIndexOffset = primitiveoffset;
 
     // ==================================================================
     // BLAS setup

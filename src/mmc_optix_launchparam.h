@@ -18,7 +18,6 @@ typedef struct __attribute__((aligned(16))) MCX_medium {
  */
 typedef struct __attribute__((aligned(16))) MMC_Parameter {
     OptixTraversableHandle gashandle[MAX_PROP_OPTIX];
-    unsigned int sbtoffset[MAX_PROP_OPTIX + 1];
 
     CUdeviceptr seedbuffer;             /**< rng seed for each thread */
     CUdeviceptr outputbuffer;
