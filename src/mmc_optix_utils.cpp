@@ -182,7 +182,7 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
                 smesh[nextmedid].face.push_back(make_uint3(n0, n2, n1));
 
                 // face norm: pointing from back to front
-                v0 = *(float3*)&tmesh->node[n0];
+                v0 = *(float3*)&tmesh->fnode[n0];
                 v1 = *(float3*)&tmesh->fnode[n1];
                 v2 = *(float3*)&tmesh->fnode[n2];
                 vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v1, (MMCfloat3*)&vec01);
