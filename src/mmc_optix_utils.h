@@ -89,7 +89,6 @@ struct OptixParams {
 
 // struct for surface mesh of each medium
 typedef struct surfaceMesh {
-    std::vector<float3> node;
     std::vector<uint3> face;
     std::vector<float3> norm;
     std::vector<unsigned int> nbtype;
