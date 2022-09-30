@@ -1,7 +1,7 @@
 #ifndef _MMC_OPTIX_LAUNCHPARAM_H
 #define _MMC_OPTIX_LAUNCHPARAM_H
 
-#define MAX_PROP_OPTIX 2000              /*maximum property number*/
+#define MAX_PROP_OPTIX 4000              /*maximum property number*/
 
 /**
  * @brief struct for medium optical properties
@@ -17,7 +17,7 @@ typedef struct __attribute__((aligned(16))) MCX_medium {
  * @brief struct for simulation configuration paramaters
  */
 typedef struct __attribute__((aligned(16))) MMC_Parameter {
-    OptixTraversableHandle gashandle[MAX_PROP_OPTIX];
+    OptixTraversableHandle gashandle0;
 
     CUdeviceptr seedbuffer;             /**< rng seed for each thread */
     CUdeviceptr outputbuffer;
@@ -41,9 +41,9 @@ typedef struct __attribute__((aligned(16))) MMC_Parameter {
     Medium medium[MAX_PROP_OPTIX];
 } MMCParam;
 
-struct TriangleMeshSBTData {
-    /**< x,y,z: face normal; w: outside medium type */
-    float4 *fnorm;
+struct __attribute__((aligned(16))) TriangleMeshSBTData {
+    float4 *fnorm; /**< x,y,z: face normal; w: neighboring medium type */
+    OptixTraversableHandle *nbgashandle;
 };
 
 #endif

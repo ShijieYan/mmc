@@ -51,7 +51,7 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
     prepareSurfMesh(mesh, smesh);
     unsigned int primitiveoffset = 0;
     for (int i = 0; i <= mesh->prop; ++i) {
-        optixcfg.launchParams.gashandle[i] = buildAccel(mesh, smesh + i, &optixcfg, primitiveoffset);
+        optixcfg.gashandles.push_back(buildAccel(mesh, smesh + i, &optixcfg, primitiveoffset));
         primitiveoffset += smesh[i].norm.size();
     }
 
@@ -206,8 +206,7 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
 /**
  * @brief prepare launch parameters
  */
-void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
-    OptixParams *optixcfg) {
+void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu, OptixParams *optixcfg) {
     if (cfg->method != rtBLBadouelGrid) {
         mcx_error(-1, "Optix MMC only supports dual grid mode", __FILE__, __LINE__);
     }
@@ -254,6 +253,9 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu,
 
     // init medium ID using element based
     optixcfg->launchParams.mediumid0 = mesh->type[cfg->e0-1];
+
+    // init gashandle using initial medium ID
+    optixcfg->launchParams.gashandle0 = optixcfg->gashandles[optixcfg->launchParams.mediumid0];
 
     // simulation flags
     optixcfg->launchParams.isreflect = cfg->isreflect;
@@ -378,7 +380,7 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode) {
     optixcfg->pipelineCompileOptions.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     optixcfg->pipelineCompileOptions.usesMotionBlur     = false;
-    optixcfg->pipelineCompileOptions.numPayloadValues   = 14;
+    optixcfg->pipelineCompileOptions.numPayloadValues   = 16;
     optixcfg->pipelineCompileOptions.numAttributeValues = 2;  // for triangle
 #ifndef NDEBUG
     optixcfg->pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_DEBUG |
@@ -672,14 +674,18 @@ void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
 
     // combine face normal + front + back into a float4 array
     std::vector<float4> fnorm;
+    std::vector<OptixTraversableHandle> nbgashandle;
     for (int i = 0; i <= mesh->prop; ++i) {
         for (size_t j = 0; j < smesh[i].norm.size(); ++j) {
             fnorm.push_back(make_float4(smesh[i].norm[j].x, smesh[i].norm[j].y,
                 smesh[i].norm[j].z, *(float*)&smesh[i].nbtype[j]));
+            nbgashandle.push_back(optixcfg->gashandles[smesh[i].nbtype[j]]);
         }
     }
-    optixcfg->faceBuffer.alloc_and_upload(fnorm);
-    rec.data.fnorm = (float4*)optixcfg->faceBuffer.d_pointer();
+    optixcfg->fnormBuffer.alloc_and_upload(fnorm);
+    optixcfg->nbgashandleBuffer.alloc_and_upload(nbgashandle);
+    rec.data.fnorm = (float4*)optixcfg->fnormBuffer.d_pointer();
+    rec.data.nbgashandle = (OptixTraversableHandle*)optixcfg->nbgashandleBuffer.d_pointer();
     hitgroupRecords.push_back(rec);
 
     optixcfg->hitgroupRecordsBuffer.alloc_and_upload(hitgroupRecords);
@@ -698,7 +704,8 @@ void clearOptixParams(OptixParams* optixcfg) {
     optixcfg->launchParamsBuffer.free();
     optixcfg->vertexBuffer.free();
     optixcfg->indexBuffer.free();
-    optixcfg->faceBuffer.free();
+    optixcfg->fnormBuffer.free();
+    optixcfg->nbgashandleBuffer.free();
     optixcfg->asBuffer.free();
     optixcfg->seedBuffer.free();
     optixcfg->outputBuffer.free();

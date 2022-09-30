@@ -13,6 +13,7 @@ typedef struct __attribute__((aligned(16))) MMC_OptiX_Ray {
     float weight;                 /**< photon current weight */
     float photontimer;            /**< the total time-of-fly of the photon */
     unsigned int mediumid;        /**< ID of current medium type */
+    OptixTraversableHandle gashandle;  /**< current gas handle */
 } optixray;
 
 /**
@@ -132,6 +133,22 @@ __device__ __forceinline__ void setRNGSeed(const uint4 &seed) {
 }
 
 /**
+ * @brief Get gashandle
+ */
+__device__ __forceinline__ OptixTraversableHandle getGasHandle() {
+    return (((OptixTraversableHandle)optixGetPayload_14()) << 32) |
+        (OptixTraversableHandle)optixGetPayload_15();
+}
+
+/**
+ * @brief Set gashandle
+ */
+__device__ __forceinline__ void setGasHandle(const OptixTraversableHandle &gashandle) {
+    optixSetPayload_14((unsigned int)(gashandle >> 32));
+    optixSetPayload_15((unsigned int)gashandle);
+}
+
+/**
  * @brief Get ray info
  */
 __device__ __forceinline__ optixray getRay() {
@@ -142,6 +159,7 @@ __device__ __forceinline__ optixray getRay() {
     r.weight = getWeight();
     r.photontimer = getPhotonTimer();
     r.mediumid = getMediumID();
+    r.gashandle = getGasHandle();
     return r;
 }
 
@@ -155,6 +173,7 @@ __device__ __forceinline__ void setRay(const optixray &r) {
     setWeight(r.weight);
     setPhotonTimer(r.photontimer);
     setMediumID(r.mediumid);
+    setGasHandle(r.gashandle);
 }
 
 /**

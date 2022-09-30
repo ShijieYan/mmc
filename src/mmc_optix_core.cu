@@ -38,19 +38,21 @@ __device__ __forceinline__ void launchPhoton(optixray &r, mcx::Random &rng) {
     r.weight = 1.0f;
     r.photontimer = 0.0f;
     r.mediumid = gcfg.mediumid0;
+    r.gashandle = gcfg.gashandle0;
 }
 
 /**
  * @brief Move a photon one step forward
  */
 __device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
-    optixTrace(gcfg.gashandle[r.mediumid], r.p0, r.dir, 0.0f, std::numeric_limits<float>::max(),
+    optixTrace(r.gashandle, r.p0, r.dir, 0.0f, std::numeric_limits<float>::max(),
         0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_CULL_FRONT_FACING_TRIANGLES, 0, 1, 0,
         *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
         *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
         *(uint32_t*)&(r.slen), *(uint32_t*)&(r.weight), *(uint32_t*)&(r.photontimer),
         r.mediumid,
-        rng.intSeed.x, rng.intSeed.y, rng.intSeed.z, rng.intSeed.w);
+        rng.intSeed.x, rng.intSeed.y, rng.intSeed.z, rng.intSeed.w,
+        *((uint32_t*)&(r.gashandle) + 1), *(uint32_t*)&(r.gashandle));
 }
 
 /**
@@ -264,15 +266,6 @@ extern "C" __global__ void __closesthit__ch() {
     // distance to the intersection
     const float hitlen = optixGetRayTmax();
 
-    // intersected triangle id
-    const int primid = optixGetPrimitiveIndex();
-
-    // get info of triangle, including face normal, neighbouring medium
-    const TriangleMeshSBTData &sbtData =
-        *(const TriangleMeshSBTData*)optixGetSbtDataPointer();
-    float4 fnorm = sbtData.fnorm[primid];
-    const uint nbmed = __float_as_uint(fnorm.w);
-
     // get medium properties
     const Medium currprop = gcfg.medium[r.mediumid];
     
@@ -301,16 +294,28 @@ extern "C" __global__ void __closesthit__ch() {
         // after hitting a boundary, update remaining scattering length
         r.slen -= lmove * currprop.mus;
 
+        // intersected triangle id
+        const int primid = optixGetPrimitiveIndex();
+
+        // get info of triangle, including face normal, neighbouring medium
+        const TriangleMeshSBTData &sbtData =
+            *(const TriangleMeshSBTData*)(optixGetSbtDataPointer());
+
+        float4 fnorm = sbtData.fnorm[primid];
+
         // assume transmission
         uint origmed = r.mediumid;
-        r.mediumid = nbmed;
+        OptixTraversableHandle origgashandle = r.gashandle;
+        r.mediumid = __float_as_uint(fnorm.w);
+        r.gashandle = sbtData.nbgashandle[primid];
 
         // update ray direction at mismatched boundary
-        if (gcfg.isreflect && currprop.n != gcfg.medium[nbmed].n) {
-            if (reflectray(*(float3*)&fnorm, currprop.n, gcfg.medium[nbmed].n,
+        if (gcfg.isreflect && currprop.n != gcfg.medium[r.mediumid].n) {
+            if (reflectray(*(float3*)&fnorm, currprop.n, gcfg.medium[r.mediumid].n,
                 rng, r)) {
                 // if the ray is reflected
                 r.mediumid = origmed;
+                r.gashandle = origgashandle;
             }
         }
     }

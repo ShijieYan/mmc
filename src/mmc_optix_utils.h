@@ -70,7 +70,8 @@ struct OptixParams {
     /*! the model we are going to trace rays against */
     osc::CUDABuffer vertexBuffer;
     osc::CUDABuffer indexBuffer;
-    osc::CUDABuffer faceBuffer;
+    osc::CUDABuffer fnormBuffer;
+    osc::CUDABuffer nbgashandleBuffer;
     //! buffer that keeps the (final, compacted) accel structure
     osc::CUDABuffer asBuffer;
 
@@ -81,6 +82,9 @@ struct OptixParams {
     float *outputHostBuffer;
     unsigned int outputBufferSize;
     osc::CUDABuffer outputBuffer;
+
+    /*! vector of gashandles */
+    std::vector<OptixTraversableHandle> gashandles;
 };
 
 // struct for surface mesh of each medium
