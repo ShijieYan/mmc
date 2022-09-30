@@ -87,7 +87,7 @@ struct OptixParams {
     std::vector<OptixTraversableHandle> gashandles;
 };
 
-// struct for surface mesh of each medium
+// struct for surface mesh of each tetrahedron
 typedef struct surfaceMesh {
     std::vector<uint3> face;
     std::vector<float3> norm;

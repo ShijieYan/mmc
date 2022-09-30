@@ -47,10 +47,14 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
 
-    surfmesh *smesh = (surfmesh*)calloc((mesh->prop + 1), sizeof(surfmesh));
+    surfmesh *smesh = (surfmesh*)calloc((mesh->ne), sizeof(surfmesh));
     prepareSurfMesh(mesh, smesh);
+    MMC_FPRINTF(cfg->flog, "optix prepare surface meshes complete:  \t%d ms\n",
+        GetTimeMillis() - tic0);
+    fflush(cfg->flog);
+
     unsigned int primitiveoffset = 0;
-    for (int i = 0; i <= mesh->prop; ++i) {
+    for (int i = 0; i < mesh->ne; ++i) {
         optixcfg.gashandles.push_back(buildAccel(mesh, smesh + i, &optixcfg, primitiveoffset));
         primitiveoffset += smesh[i].norm.size();
     }
@@ -157,48 +161,32 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
     float3 v0, v1, v2, vec01, vec02, vnorm;
     for (int i = 0; i < tmesh->ne; ++i) {
         // iterate over each tetrahedra
-        unsigned int currmedid = tmesh->type[i];
-        for(int j = 0; j < tmesh->elemlen; ++j){
+        for(int j = 0; j < tmesh->elemlen; ++j) {
             // iterate over each triangle
             int nexteid = fnb[(i * tmesh->elemlen) + j];
-            if (nexteid == INT_MIN) continue;
             unsigned int nextmedid = ((nexteid < 0) ? 0 : tmesh->type[nexteid - 1]);
-            if(currmedid != nextmedid) {
-                // face nodes
-                unsigned int n0 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
-                unsigned int n1 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
-                unsigned int n2 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
 
-                // face vertex indices
-                smesh[currmedid].face.push_back(make_uint3(n0, n1, n2));
-                smesh[nextmedid].face.push_back(make_uint3(n0, n2, n1));
+            // face nodes
+            unsigned int n0 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
+            unsigned int n1 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
+            unsigned int n2 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
 
-                // outward-pointing face norm
-                v0 = *(float3*)&tmesh->fnode[n0];
-                v1 = *(float3*)&tmesh->fnode[n1];
-                v2 = *(float3*)&tmesh->fnode[n2];
-                vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v1, (MMCfloat3*)&vec01);
-                vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v2, (MMCfloat3*)&vec02);
-                vec_cross((MMCfloat3*)&vec01, (MMCfloat3*)&vec02, (MMCfloat3*)&vnorm);
-                float mag = 1.0f / sqrtf(vec_dot((MMCfloat3*)&vnorm, (MMCfloat3*)&vnorm));
-                vec_mult((MMCfloat3*)&vnorm, mag, (MMCfloat3*)&vnorm);
-                smesh[currmedid].norm.push_back(vnorm);
-                smesh[nextmedid].norm.push_back(-vnorm);
+            // face vertex indices
+            smesh[i].face.push_back(make_uint3(n0, n1, n2));
 
-                // neighbour medium types
-                smesh[currmedid].nbtype.push_back(nextmedid);
-                smesh[nextmedid].nbtype.push_back(currmedid);
+            // outward-pointing face norm
+            v0 = *(float3*)&tmesh->fnode[n0];
+            v1 = *(float3*)&tmesh->fnode[n1];
+            v2 = *(float3*)&tmesh->fnode[n2];
+            vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v1, (MMCfloat3*)&vec01);
+            vec_diff((MMCfloat3*)&v0, (MMCfloat3*)&v2, (MMCfloat3*)&vec02);
+            vec_cross((MMCfloat3*)&vec01, (MMCfloat3*)&vec02, (MMCfloat3*)&vnorm);
+            float mag = 1.0f / sqrtf(vec_dot((MMCfloat3*)&vnorm, (MMCfloat3*)&vnorm));
+            vec_mult((MMCfloat3*)&vnorm, mag, (MMCfloat3*)&vnorm);
+            smesh[i].norm.push_back(vnorm);
 
-                fnb[(i * tmesh->elemlen) + j] = INT_MIN;
-                if(nexteid > 0){
-                    for(int k = 0; k < tmesh->elemlen; ++k){
-                        if(fnb[((nexteid - 1) * tmesh->elemlen) + k] == i + 1) {
-                            fnb[((nexteid - 1) * tmesh->elemlen) + k] = INT_MIN;
-                            break;
-                        }
-                    }
-                }
-            }
+            // neighbour medium types
+            smesh[i].nbtype.push_back(nextmedid);
         }
     }
 }
@@ -255,7 +243,7 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu, OptixParams *o
     optixcfg->launchParams.mediumid0 = mesh->type[cfg->e0-1];
 
     // init gashandle using initial medium ID
-    optixcfg->launchParams.gashandle0 = optixcfg->gashandles[optixcfg->launchParams.mediumid0];
+    optixcfg->launchParams.gashandle0 = optixcfg->gashandles[cfg->e0-1];
 
     // simulation flags
     optixcfg->launchParams.isreflect = cfg->isreflect;
@@ -635,7 +623,7 @@ void createPipeline(OptixParams* optixcfg) {
 /**
  * @ set up the shader binding table
  */
-void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
+void buildSBT(tetmesh* tmesh, surfmesh* smesh, OptixParams* optixcfg) {
     // ==================================================================
     // build raygen records
     // ==================================================================
@@ -675,11 +663,12 @@ void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
     // combine face normal + front + back into a float4 array
     std::vector<float4> fnorm;
     std::vector<OptixTraversableHandle> nbgashandle;
-    for (int i = 0; i <= mesh->prop; ++i) {
-        for (size_t j = 0; j < smesh[i].norm.size(); ++j) {
+    for (int i = 0; i < tmesh->ne; ++i) {
+        for (int j = 0; j < tmesh->elemlen; ++j) {
             fnorm.push_back(make_float4(smesh[i].norm[j].x, smesh[i].norm[j].y,
                 smesh[i].norm[j].z, *(float*)&smesh[i].nbtype[j]));
-            nbgashandle.push_back(optixcfg->gashandles[smesh[i].nbtype[j]]);
+            int nexteid = tmesh->facenb[(i * tmesh->elemlen) + j];
+            nbgashandle.push_back(nexteid > 0 ? optixcfg->gashandles[nexteid - 1] : 0);
         }
     }
     optixcfg->fnormBuffer.alloc_and_upload(fnorm);
