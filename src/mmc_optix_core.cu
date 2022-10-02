@@ -15,6 +15,8 @@ enum TOutputType {otFlux, otFluence, otEnergy, otJacobian, otWL, otWP};
 
 constexpr float R_C0 = 3.335640951981520e-12f; // 1/C0 in s/mm
 constexpr float MAX_ACCUM = 1000.0f;
+constexpr float SAFETY_DISTANCE = 0.0001f; // ensure ray cut through triangle
+constexpr float DOUBLE_SAFETY_DISTANCE = 0.0002f;
 
 // simulation configuration and medium optical properties
 extern "C" {
@@ -209,6 +211,7 @@ __device__ __forceinline__ bool reflectray(const float3 &norm, const float &n1,
 
         if (rng.uniform(0.0f, 1.0f) <= Rtotal) {
             // do reflection, correct photon position
+            r.p0 -= r.dir * DOUBLE_SAFETY_DISTANCE;
             r.dir += -2.0f * Icos * norm;
         } else {
             // do transmission
@@ -218,6 +221,7 @@ __device__ __forceinline__ bool reflectray(const float3 &norm, const float &n1,
         }
     } else {
         // total internel reflection, correct photon position
+        r.p0 -= r.dir * DOUBLE_SAFETY_DISTANCE;
         r.dir += -2.0f * Icos * norm;
     }
 
@@ -308,6 +312,9 @@ extern "C" __global__ void __closesthit__ch() {
         OptixTraversableHandle origgashandle = r.gashandle;
         r.mediumid = __float_as_uint(fnorm.w);
         r.gashandle = sbtData.nbgashandle[primid];
+
+        // update photon position to cut through the hit triangle
+        r.p0 += r.dir * SAFETY_DISTANCE;
 
         // update ray direction at mismatched boundary
         if (gcfg.isreflect && currprop.n != gcfg.medium[r.mediumid].n) {
