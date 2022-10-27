@@ -85,6 +85,10 @@ struct OptixParams {
 
     /*! vector of gashandles */
     std::vector<OptixTraversableHandle> gashandles;
+
+    /*! vector of connected region id */
+    unsigned int regioncount;
+    std::vector<int> connectedregion;
 };
 
 // struct for surface mesh of each medium
@@ -92,6 +96,7 @@ typedef struct surfaceMesh {
     std::vector<uint3> face;
     std::vector<float3> norm;
     std::vector<unsigned int> nbtype;
+    std::vector<unsigned int> nbregion;
 } surfmesh;
 
 #ifdef __cplusplus
@@ -107,7 +112,10 @@ void createModule(mcconfig* cfg, OptixParams* optixcfg, std::string ptxcode);
 void createRaygenPrograms(OptixParams* optixcfg);
 void createMissPrograms(OptixParams* optixcfg);
 void createHitgroupPrograms(OptixParams* optixcfg);
-void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh);
+void extractConnectedRegion(tetmesh *tmesh, OptixParams *optixcfg);
+void findSimplyConnectedRegion(tetmesh *tmesh, std::vector<int> &connectedregion,
+    int regionid, int elemid);
+void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh, OptixParams *optixcfg);
 OptixTraversableHandle buildAccel(tetmesh *tmesh, surfmesh* smesh, OptixParams* optixcfg,
     unsigned int primitiveoffset);
 void createPipeline(OptixParams* optixcfg);

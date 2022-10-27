@@ -4,8 +4,7 @@
 #include <cstring>
 #include <optix_function_table_definition.h>
 #include <iomanip>
-#include <unordered_map>
-#include <unordered_set>
+#include <algorithm>
 #include <sutil/vec_math.h>
 #include <limits.h>
 #ifdef _OPENMP
@@ -47,10 +46,13 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
         GetTimeMillis() - tic0);
     fflush(cfg->flog);
 
-    surfmesh *smesh = (surfmesh*)calloc((mesh->prop + 1), sizeof(surfmesh));
-    prepareSurfMesh(mesh, smesh);
+    extractConnectedRegion(mesh, &optixcfg);
+    MMC_FPRINTF(cfg->flog, "extracting connected region complete:  \t%d ms\n", GetTimeMillis() - tic0);
+    surfmesh *smesh = (surfmesh*)calloc(optixcfg.regioncount, sizeof(surfmesh));
+    prepareSurfMesh(mesh, smesh, &optixcfg);
+    MMC_FPRINTF(cfg->flog, "prepare surface mesh complete:  \t%d ms\n", GetTimeMillis() - tic0);
     unsigned int primitiveoffset = 0;
-    for (int i = 0; i <= mesh->prop; ++i) {
+    for (unsigned int i = 0; i < optixcfg.regioncount; ++i) {
         optixcfg.gashandles.push_back(buildAccel(mesh, smesh + i, &optixcfg, primitiveoffset));
         primitiveoffset += smesh[i].norm.size();
     }
@@ -147,10 +149,47 @@ void optix_run_simulation(mcconfig* cfg, tetmesh* mesh, raytracer* tracer, GPUIn
     clearOptixParams(&optixcfg);
 }
 
+/**<
+ * @brief Label the tetrahedron elements in each simply connected region
+ */
+void extractConnectedRegion(tetmesh *tmesh, OptixParams *optixcfg) {
+    // -1 indicates that the element is not labeled yet
+    optixcfg->connectedregion.resize(tmesh->ne, -1);
+    unsigned int regionid = 1; // start from 1 because 0 will be used by the region outside
+    for (int i = 0; i < tmesh->ne; ++i) {
+        if (optixcfg->connectedregion[i] == -1) {
+            // if the ith element is not labeled yet, we find a new region
+            findSimplyConnectedRegion(tmesh, optixcfg->connectedregion, regionid++, i);
+        }
+    }
+    optixcfg->regioncount = regionid;
+}
+
+/**<
+ * @brief Use DFS to find the simply connected region for a tetrahedron element
+ */
+void findSimplyConnectedRegion(tetmesh *tmesh, std::vector<int> &connectedregion,
+    int regionid, int elemid) {
+    // label the element
+    connectedregion[elemid] = regionid;
+
+    // check the neighbouring elements
+    unsigned int currmedid = tmesh->type[elemid];
+    for (int i = 0; i < tmesh->elemlen; ++i) {
+        int nextelemid = tmesh->facenb[(elemid * tmesh->elemlen) + i] - 1;
+        if (nextelemid >= 0) {
+            unsigned int nextmedid = tmesh->type[nextelemid];
+            if (nextmedid == currmedid && connectedregion[nextelemid] != regionid) {
+                findSimplyConnectedRegion(tmesh, connectedregion, regionid, nextelemid);
+            }
+        }
+    }
+}
+
 /**
  * @brief extract surface mesh for each medium
  */
-void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
+void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh, OptixParams *optixcfg) {
     int *fnb = (int*)calloc(tmesh->ne * tmesh->elemlen, sizeof(int));
     memcpy(fnb, tmesh->facenb, (tmesh->ne * tmesh->elemlen) * sizeof(int));
 
@@ -158,20 +197,22 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
     for (int i = 0; i < tmesh->ne; ++i) {
         // iterate over each tetrahedra
         unsigned int currmedid = tmesh->type[i];
+        unsigned int currregionid = optixcfg->connectedregion[i];
         for(int j = 0; j < tmesh->elemlen; ++j){
             // iterate over each triangle
             int nexteid = fnb[(i * tmesh->elemlen) + j];
             if (nexteid == INT_MIN) continue;
             unsigned int nextmedid = ((nexteid < 0) ? 0 : tmesh->type[nexteid - 1]);
-            if(currmedid != nextmedid) {
+            unsigned int nextregionid = ((nexteid < 0) ? 0 : optixcfg->connectedregion[nexteid - 1]);
+            if(currregionid != nextregionid) {
                 // face nodes
                 unsigned int n0 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][0]] - 1;
                 unsigned int n1 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][1]] - 1;
                 unsigned int n2 = tmesh->elem[(i * tmesh->elemlen) + out[ifaceorder[j]][2]] - 1;
 
                 // face vertex indices
-                smesh[currmedid].face.push_back(make_uint3(n0, n1, n2));
-                smesh[nextmedid].face.push_back(make_uint3(n0, n2, n1));
+                smesh[currregionid].face.push_back(make_uint3(n0, n1, n2));
+                smesh[nextregionid].face.push_back(make_uint3(n0, n2, n1));
 
                 // outward-pointing face norm
                 v0 = *(float3*)&tmesh->fnode[n0];
@@ -182,12 +223,16 @@ void prepareSurfMesh(tetmesh *tmesh, surfmesh *smesh) {
                 vec_cross((MMCfloat3*)&vec01, (MMCfloat3*)&vec02, (MMCfloat3*)&vnorm);
                 float mag = 1.0f / sqrtf(vec_dot((MMCfloat3*)&vnorm, (MMCfloat3*)&vnorm));
                 vec_mult((MMCfloat3*)&vnorm, mag, (MMCfloat3*)&vnorm);
-                smesh[currmedid].norm.push_back(vnorm);
-                smesh[nextmedid].norm.push_back(-vnorm);
+                smesh[currregionid].norm.push_back(vnorm);
+                smesh[nextregionid].norm.push_back(-vnorm);
 
                 // neighbour medium types
-                smesh[currmedid].nbtype.push_back(nextmedid);
-                smesh[nextmedid].nbtype.push_back(currmedid);
+                smesh[currregionid].nbtype.push_back(nextmedid);
+                smesh[nextregionid].nbtype.push_back(currmedid);
+
+                // neighbour region id
+                smesh[currregionid].nbregion.push_back(nextregionid);
+                smesh[nextregionid].nbregion.push_back(currregionid);
 
                 fnb[(i * tmesh->elemlen) + j] = INT_MIN;
                 if(nexteid > 0){
@@ -258,7 +303,8 @@ void prepLaunchParams(mcconfig* cfg, tetmesh* mesh, GPUInfo* gpu, OptixParams *o
     optixcfg->launchParams.mediumid0 = mesh->type[cfg->e0-1];
 
     // init gashandle using initial medium ID
-    optixcfg->launchParams.gashandle0 = optixcfg->gashandles[optixcfg->launchParams.mediumid0];
+    optixcfg->launchParams.gashandle0 =
+        optixcfg->gashandles[optixcfg->connectedregion[cfg->e0-1]];
 
     // simulation flags
     optixcfg->launchParams.isreflect = cfg->isreflect;
@@ -638,7 +684,7 @@ void createPipeline(OptixParams* optixcfg) {
 /**
  * @ set up the shader binding table
  */
-void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
+void buildSBT(tetmesh* tmesh, surfmesh* smesh, OptixParams* optixcfg) {
     // ==================================================================
     // build raygen records
     // ==================================================================
@@ -678,11 +724,11 @@ void buildSBT(tetmesh* mesh, surfmesh* smesh, OptixParams* optixcfg) {
     // combine face normal + front + back into a float4 array
     std::vector<float4> fnorm;
     std::vector<OptixTraversableHandle> nbgashandle;
-    for (int i = 0; i <= mesh->prop; ++i) {
+    for (unsigned int i = 0; i < optixcfg->regioncount; ++i) {
         for (size_t j = 0; j < smesh[i].norm.size(); ++j) {
             fnorm.push_back(make_float4(smesh[i].norm[j].x, smesh[i].norm[j].y,
                 smesh[i].norm[j].z, *(float*)&smesh[i].nbtype[j]));
-            nbgashandle.push_back(optixcfg->gashandles[smesh[i].nbtype[j]]);
+            nbgashandle.push_back(optixcfg->gashandles[smesh[i].nbregion[j]]);
         }
     }
     optixcfg->fnormBuffer.alloc_and_upload(fnorm);
