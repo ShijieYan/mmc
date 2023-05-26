@@ -30,7 +30,7 @@
 *******************************************************************************/
 
 /***************************************************************************//**
-\file    tettracing.c
+\file    mmc_raytrace.c
 
 \brief   Core unit for mash-based photon transport using ray tracing algorithms
 *******************************************************************************/
@@ -87,7 +87,7 @@ const int nc[4][3] = {{3, 0, 1}, {3, 1, 2}, {2, 0, 3}, {1, 0, 2}};
  * the normal vec of each face pointing outwards.
  */
 
-extern const int out[4][3];     /**< defined in simpmesh.c, node orders for each face, in counter-clock-wise orders*/
+extern const int out[4][3];     /**< defined in mmc_mesh.c, node orders for each face, in counter-clock-wise orders*/
 
 /**
  * \brief The local index of the node with an opposite face to the i-th face defined in nc[][]
@@ -1415,6 +1415,10 @@ float branchless_badouel_raytet(ray* r, raytracer* tracer, mcconfig* cfg, visito
         medium* prop;
         int* enb, *ee = (int*)(tracer->mesh->elem + eid * tracer->mesh->elemlen);
         float mus;
+
+        if (cfg->implicit == 1 && r->inroi && tracer->mesh->edgeroi && fabs(tracer->mesh->edgeroi[eid * 6]) < EPS) {
+            r->inroi = 0;
+        }
 
         if (cfg->implicit && r->inroi) {
             prop = tracer->mesh->med + tracer->mesh->prop;

@@ -47,7 +47,12 @@
 #include "mex.h"
 #include "mmc_mesh.h"
 #include "mmc_host.h"
-#include "mmc_cl_host.h"
+#ifdef USE_OPENCL
+    #include "mmc_cl_host.h"
+#endif
+#ifdef USE_CUDA
+    #include "mmc_cu_host.h"
+#endif
 #include "mmc_tictoc.h"
 #include "mmc_raytrace.h"
 #include "waitmex/waitmex.c"
@@ -1166,7 +1171,7 @@ extern "C" int mmc_throw_exception(const int id, const char* msg, const char* fi
  */
 
 void mmclab_usage() {
-    printf("Usage:\n    [flux,detphoton]=mmclab(cfg);\n\nPlease run 'help mmclab' for more details.\n");
+    printf("MMCLAB v2023.01\nUsage:\n    [flux,detphoton]=mmclab(cfg);\n\nPlease run 'help mmclab' for more details.\n");
 }
 
 /**

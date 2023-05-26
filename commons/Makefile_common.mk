@@ -58,14 +58,14 @@ endif
 
 MEXLINKOPT +=$(OPENMPLIB)
 MKMEX      :=mex
-MKMEXOPT    =CC='$(CC)' CXX='$(CXX)' CXXLIBS='$$CXXLIBS $(LIBOPENCL)' CXXFLAGS='$(CCFLAGS) $(USERCCFLAGS)' LDFLAGS='-L$$TMW_ROOT$$MATLABROOT/sys/os/$$ARCH $$LDFLAGS $(MEXLINKOPT)' $(FASTMATH) -cxx -outdir $(BINDIR)
+MKMEXOPT    =CC='$(CC)' CXX='$(CXX)' CXXLIBS='$$CXXLIBS $(LIBOPENCL) $(LIBCUDART)' CXXFLAGS='$(CCFLAGS) $(USERCCFLAGS)' LDFLAGS='-L$$TMW_ROOT$$MATLABROOT/sys/os/$$ARCH $$LDFLAGS $(MEXLINKOPT)' $(FASTMATH) -cxx -outdir $(BINDIR)
 MKOCT      :=mkoctfile -v
 
 DLLFLAG=-fPIC
 
 PLATFORM = $(shell uname -s)
 ifeq ($(findstring MINGW64,$(PLATFORM)), MINGW64)
-    MW_MINGW64_LOC=/c/msys64/usr/
+    MW_MINGW64_LOC?=/c/msys64/usr/
     MKMEX      :=cmd //c mex.bat
     INCLUDEDIRS+=-I"./mingw64/include"
     LIBOPENCL   ="c:\Windows\System32\OpenCL.dll"
@@ -133,8 +133,8 @@ ifeq ($(CC),icc)
 endif
 
 ifeq ($(CC),clang)
-	OPENMP   := -fopenmp
-        OPENMPLIB:= -fopenmp=libiomp5
+        OPENMP   := -Xpreprocessor -fopenmp
+        OPENMPLIB:= -lomp
 endif
 
 ARFLAGS    := 
@@ -168,13 +168,6 @@ ssemath:   CCFLAGS+=-DUSE_SSE2 -DMMC_USE_SSE_MATH
 mex mexomp:        ARFLAGS+=$(MKMEXOPT)
 prof:      CCFLAGS+= -O3 -pg
 prof:      ARFLAGS+= -O3 -g -pg
-
-pnacl:     CC=$(PNACL_TC_PATH)/bin/pnacl-clang++
-pnacl:     AR=$(PNACL_TC_PATH)/bin/pnacl-ar
-pnacl:	   ARFLAGS= cr
-pnacl:	   EXTRALIB   :=
-pnacl:     INCLUDEDIR+= -I$(NACL_SDK_ROOT)/include/pnacl
-pnacl:     BINARY=libmmc-pnacl.a
 
 web: CCFLAGS+= -DMMC_USE_SSE -DHAVE_SSE2 -msse -msse2 -msse3 -mssse3
 web: CCFLAGS+= -O3 $(OPENMP) $(FASTMATH)
@@ -218,8 +211,10 @@ ifeq ($(TARGETSUFFIX),.a)
 endif
 
 cuda: sse
+cudamex: mex
+cudaoct: oct
 
-all release sse ssemath prof omp mex oct mexomp octomp pnacl web debug cuda: $(SUBDIRS) $(BINDIR)/$(BINARY)
+all release sse ssemath prof omp mex oct mexomp octomp web debug cuda: $(SUBDIRS) $(BINDIR)/$(BINARY)
 
 $(SUBDIRS):
 	$(MAKE) -C $@ --no-print-directory
