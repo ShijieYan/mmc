@@ -17,6 +17,7 @@ constexpr float R_C0 = 3.335640951981520e-12f; // 1/C0 in s/mm
 constexpr float MAX_ACCUM = 1000.0f;
 constexpr float SAFETY_DISTANCE = 0.0001f; // heuristic to ensure ray cut through triangle
 constexpr float DOUBLE_SAFETY_DISTANCE = SAFETY_DISTANCE * 2.0f;
+constexpr float OFFSET = 1e-5f;
 
 // simulation configuration and medium optical properties
 extern "C" {
@@ -46,8 +47,8 @@ __device__ __forceinline__ void launchPhoton(optixray &r, mcx::Random &rng) {
  * @brief Move a photon one step forward
  */
 __device__ __forceinline__ void movePhoton(optixray &r, mcx::Random &rng) {
-    optixTrace(gcfg.gashandle, r.p0, r.dir, 0.0f,
-        gcfg.medium[r.mediumid].mus ? r.slen / gcfg.medium[r.mediumid].mus : std::numeric_limits<float>::max(),
+    optixTrace(gcfg.gashandle, r.p0 - r.dir * OFFSET, r.dir, 0.0f,
+        gcfg.medium[r.mediumid].mus ? (r.slen / gcfg.medium[r.mediumid].mus + OFFSET) : std::numeric_limits<float>::max(),
         0.0f, OptixVisibilityMask(255), OptixRayFlags::OPTIX_RAY_FLAG_NONE, 0, 1, 0,
         *(uint32_t*)&(r.p0.x), *(uint32_t*)&(r.p0.y), *(uint32_t*)&(r.p0.z),
         *(uint32_t*)&(r.dir.x), *(uint32_t*)&(r.dir.y), *(uint32_t*)&(r.dir.z),
@@ -267,7 +268,7 @@ extern "C" __global__ void __closesthit__ch() {
     mcx::Random rng = getRNG();
 
     // distance to the intersection
-    const float hitlen = optixGetRayTmax();
+    const float hitlen = optixGetRayTmax() - OFFSET;
 
     // intersected triangle id
     const int primid = optixGetPrimitiveIndex();
@@ -326,8 +327,34 @@ extern "C" __global__ void __closesthit__ch() {
 }
 
 extern "C" __global__ void __miss__ms() {
+    // uint thread_to_print = 37084;
+    // get thread index
+    uint3 launchindex = optixGetLaunchIndex();
+
     // get photon and ray information from payload
     optixray r = getRay();
+
+    // outside of the inner box
+    // if (launchindex.x == thread_to_print) {
+        // if (r.p0.x < 15.0f || r.p0.x > 45.0f ||
+        //     r.p0.y < 15.0f || r.p0.y > 45.0f ||
+        //     r.p0.z < 15.0f || r.p0.z > 45.0f) {
+        //     printf("Photon leakage detected on thread #%u: p:[%f %f %f], v:[%f %f %f], tissue:%u. Terminated!\n",
+        //         launchindex.x, r.p0.x, r.p0.y, r.p0.z, r.dir.x, r.dir.y, r.dir.z, r.mediumid);
+        //     setMediumID(0);
+        //     return;
+        // }
+    // }
+    // if (launchindex.x == thread_to_print) {
+        // if (sqrtf((r.p0.x - 30.0f) * (r.p0.x - 30.0f) +
+        //           (r.p0.y - 30.0f) * (r.p0.y - 30.0f) +
+        //           (r.p0.z - 30.0f) * (r.p0.z - 30.0f)) > 15.01f) {
+        //     printf("Photon leakage detected on thread #%u: p:[%f %f %f], v:[%f %f %f], tissue:%u. Terminated!\n",
+        //         launchindex.x, r.p0.x, r.p0.y, r.p0.z, r.dir.x, r.dir.y, r.dir.z, r.mediumid);
+        //     setMediumID(0);
+        //     return;
+        // }
+    // }
 
     // get rng
     mcx::Random rng = getRNG();
@@ -350,6 +377,11 @@ extern "C" __global__ void __miss__ms() {
     // update photon timer
     r.photontimer += lmove * R_C0 * currprop.n;
 
+    // if (launchindex.x == thread_to_print) {
+    //     printf("Photon gets scattered on thread #%u: p:[%f %f %f], prev dir:[%f %f %f], tissue:%u, new slen: %f, ",
+    //         launchindex.x, r.p0.x, r.p0.y, r.p0.z, r.dir.x, r.dir.y, r.dir.z, r.mediumid, r.slen);
+    // }
+
     // scattering event
     r.dir = selectScatteringDirection(r.dir, currprop.g, rng);
     r.slen = rng.rand_next_scatlen();
@@ -359,4 +391,9 @@ extern "C" __global__ void __miss__ms() {
 
     // update ray
     setRay(r);
+
+    // if (launchindex.x == thread_to_print) {
+    //     printf("new dir:[%f %f %f], new slen: %f\n",
+    //         r.dir.x, r.dir.y, r.dir.z, r.slen);
+    // }
 }
